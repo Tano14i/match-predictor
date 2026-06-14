@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Match Prediction Engine</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap');
+
+  :root {
+    --bg:       #0d0f0e;
+    --surface:  #141714;
+    --panel:    #1a1e1a;
+    --border:   #252825;
+    --amber:    #f0a500;
+    --amberDim: #7d5600;
+    --green:    #3ecf60;
+    --red:      #e84444;
+    --blue:     #4da6ff;
+    --text:     #e8ead8;
+    --mid:      #8a9080;
+    --dim:      #3a4035;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; min-height: 100vh; }
+  
+  .wrap { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+
+  /* HEADER */
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); display: inline-block; margin-right: 8px; transition: all .3s; }
+  .status-dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .status-label { font-size: 10px; letter-spacing: .12em; font-family: 'JetBrains Mono', monospace; color: var(--dim); transition: color .3s; }
+  .status-label.on { color: var(--green); }
+  h1 { font-size: 24px; font-weight: 700; letter-spacing: -.02em; margin: 6px 0 4px; }
+  .subtitle { font-size: 12px; color: var(--mid); }
+
+  /* PANELS */
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px; margin-bottom: 14px;
+  }
+  .panel.highlight { border-color: #f0a50033; }
+
+  /* LABELS */
+  .lbl { font-size: 10px; color: var(--mid); letter-spacing: .08em; text-transform: uppercase; display: block; margin-bottom: 5px; }
+
+  /* INPUTS */
+  input, select {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); padding: 9px 11px; font-size: 13px; width: 100%;
+    font-family: 'Inter', sans-serif; outline: none; transition: border-color .2s;
+  }
+  input:focus, select:focus { border-color: var(--amber); }
+  input[type=number]::-webkit-inner-spin-button { opacity: .3; }
+  select option { background: var(--panel); }
+
+  /* GRIDS */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .grid4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }
+  .vs-grid { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: end; }
+  .vs-sep { font-size: 18px; color: var(--dim); text-align: center; padding-bottom: 2px; }
+
+  /* BUTTONS */
+  .btn-primary {
+    width: 100%; padding: 13px; background: var(--amber); color: #000;
+    border: none; border-radius: 8px; font-size: 14px; font-weight: 700;
+    cursor: pointer; letter-spacing: .04em; text-transform: uppercase;
+    transition: background .15s; margin-bottom: 20px;
+  }
+  .btn-primary:hover:not(:disabled) { background: #c98900; }
+  .btn-primary:disabled { background: var(--amberDim); cursor: not-allowed; }
+
+  .btn-save {
+    background: var(--amber); color: #000; border: none; border-radius: 6px;
+    padding: 9px 16px; font-size: 13px; font-weight: 700; cursor: pointer;
+    white-space: nowrap; transition: all .2s; flex-shrink: 0;
+  }
+  .btn-save.saved { background: #3ecf6022; color: var(--green); border: 1px solid #3ecf6044; }
+
+  /* TABS */
+  .tabs { display: flex; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 4px; margin-bottom: 14px; gap: 0; }
+  .tab {
+    flex: 1; padding: 8px 12px; border: none; border-radius: 6px;
+    font-size: 12px; font-weight: 600; cursor: pointer; transition: all .15s;
+    background: transparent; color: var(--mid); font-family: 'Inter', sans-serif;
+  }
+  .tab.active { background: var(--panel); color: var(--amber); box-shadow: inset 0 0 0 1px var(--border); }
+
+  /* LOG */
+  .log {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 16px; font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--mid); line-height: 1.8; max-height: 160px;
+    overflow-y: auto; display: none;
+  }
+  .log.visible { display: block; }
+
+  /* VERDICT */
+  .verdict {
+    border-radius: 12px; padding: 18px 22px; margin-bottom: 14px; text-align: center;
+    background: var(--panel); border: 2px solid var(--border);
+  }
+  .verdict-label { font-size: 26px; font-weight: 800; }
+  .verdict-sub { font-size: 12px; color: var(--mid); margin-top: 5px; }
+
+  /* STAT CARD */
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 13px 15px;
+  }
+  .card-label { font-size: 10px; color: var(--mid); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 4px; }
+  .card-value { font-size: 20px; font-weight: 700; font-family: 'JetBrains Mono', monospace; line-height: 1.1; }
+  .card-sub { font-size: 11px; color: var(--mid); margin-top: 3px; }
+
+  /* BAR */
+  .bar-wrap { background: var(--border); border-radius: 3px; height: 5px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 3px; transition: width .4s; }
+
+  /* FORM BADGES */
+  .badge {
+    display: inline-block; border-radius: 3px; padding: 2px 6px;
+    font-size: 10px; font-weight: 700; margin: 2px;
+  }
+  .badge-w { background: var(--green); color: #000; }
+  .badge-d { background: var(--mid); color: #000; }
+  .badge-l { background: var(--red); color: #fff; }
+
+  /* TEAM CARD */
+  .team-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .team-name { font-size: 13px; font-weight: 700; }
+  .team-meta { font-size: 10px; color: var(--mid); margin-bottom: 10px; }
+  .mini-stat-label { font-size: 9px; color: var(--dim); text-transform: uppercase; margin-bottom: 2px; }
+  .mini-stat-value { font-size: 16px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+
+  /* HISTORY ROW */
+  .history-row { display: flex; justify-content: space-between; font-size: 10px; color: var(--mid); margin-top: 4px; }
+  .history-score { font-family: 'JetBrains Mono', monospace; font-weight: 700; }
+  .score-w { color: var(--green); }
+  .score-d { color: var(--mid); }
+  .score-l { color: var(--red); }
+
+  /* SCORE ROWS */
+  .score-row { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+  .score-rank {
+    width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; background: var(--border); color: var(--mid);
+  }
+  .score-rank.top { background: var(--amber); color: #000; }
+  .score-val { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 15px; width: 38px; flex-shrink: 0; color: var(--text); }
+  .score-val.top { color: var(--amber); }
+  .score-pct { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--mid); width: 40px; text-align: right; flex-shrink: 0; }
+
+  /* FIXTURE ITEM */
+  .fixture-item {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; cursor: pointer; display: flex; justify-content: space-between;
+    align-items: center; font-size: 12px; margin-bottom: 4px; transition: border-color .15s;
+    font-family: 'Inter', sans-serif; color: var(--text); width: 100%; text-align: left;
+  }
+  .fixture-item:hover { border-color: var(--amber); }
+  .fixture-time { color: var(--mid); font-size: 11px; margin: 0 8px; }
+  .league-header { font-size: 10px; color: var(--amber); letter-spacing: .08em; text-transform: uppercase; margin: 10px 0 6px; }
+
+  /* DIVIDER */
+  .divider { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px; }
+
+  /* DISCLAIMER */
+  .disclaimer { font-size: 10px; color: var(--dim); text-align: center; line-height: 1.6; margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--border); }
+
+  /* HIDDEN */
+  .hidden { display: none !important; }
+
+  @media (max-width: 600px) {
+    .grid4 { grid-template-columns: 1fr 1fr; }
+    .grid3 { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- HEADER -->
+  <div style="margin-bottom:22px">
+    <div style="display:flex;align-items:center;margin-bottom:5px">
+      <span class="status-dot" id="statusDot"></span>
+      <span class="status-label" id="statusLabel">INSERIRE API KEY PER INIZIARE</span>
+    </div>
+    <h1>Match Prediction Engine</h1>
+    <p class="subtitle">Dati live · Forma reale · Corner · Poisson · Partite di oggi</p>
+  </div>
+
+  <!-- API KEY -->
+  <div class="panel highlight" id="apiPanel">
+    <span class="lbl">🔑 API-Football Key (RapidAPI)</span>
+    <div style="display:flex;gap:10px;margin-bottom:8px">
+      <input type="password" id="apiKeyInput" placeholder="Incolla qui la tua API key…" style="flex:1" />
+      <button class="btn-save" id="btnSave" onclick="saveKey()">Salva</button>
+    </div>
+    <div id="apiMsg" style="font-size:11px;color:var(--dim)">
+      Ottieni la key gratuita su <span style="color:var(--amber)">rapidapi.com → API-Football</span> (100 chiamate/giorno) · La key resta solo in questo browser.
+    </div>
+  </div>
+
+  <!-- MAIN (hidden until key saved) -->
+  <div id="mainContent" class="hidden">
+
+    <!-- TABS -->
+    <div class="tabs">
+      <button class="tab active" id="tabSearch" onclick="switchTab('search')">🔍 Cerca Squadre</button>
+      <button class="tab" id="tabToday" onclick="switchTab('today')">📅 Partite di Oggi</button>
+    </div>
+
+    <!-- TAB: SEARCH -->
+    <div id="paneSearch">
+      <div class="panel">
+        <div class="vs-grid" style="margin-bottom:14px">
+          <div>
+            <span class="lbl">🏠 Casa</span>
+            <input type="text" id="homeInput" placeholder="es. Inter, Barcelona, France…" />
+          </div>
+          <div class="vs-sep">vs</div>
+          <div>
+            <span class="lbl">✈️ Ospite</span>
+            <input type="text" id="awayInput" placeholder="es. Milan, Real Madrid…" />
+          </div>
+        </div>
+        <div class="divider grid4">
+          <div>
+            <span class="lbl">Assenze (+ casa / − osp)</span>
+            <input type="number" id="inAssenze" value="0" />
+          </div>
+          <div>
+            <span class="lbl">Pressione 0–10</span>
+            <input type="number" id="inPressione" value="3" />
+          </div>
+          <div>
+            <span class="lbl">Motivazione −10/+10</span>
+            <input type="number" id="inMotiv" value="0" />
+          </div>
+          <div>
+            <span class="lbl">Mercato</span>
+            <select id="inMarket">
+              <option value="STABLE">STABLE →</option>
+              <option value="DOWN">DOWN ↓</option>
+              <option value="UP">UP ↑</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <button class="btn-primary" id="btnAnalyze" onclick="analyze()">⚡ Analizza Partita</button>
+    </div>
+
+    <!-- TAB: TODAY -->
+    <div id="paneToday" class="hidden">
+      <div class="panel" id="todayPanel">
+        <div style="font-size:12px;color:var(--mid)">⏳ Carico partite di oggi…</div>
+      </div>
+    </div>
+
+    <!-- LOG -->
+    <div class="log" id="logBox"></div>
+
+    <!-- TEAM CARDS -->
+    <div class="grid2 hidden" id="teamCards" style="margin-bottom:14px">
+      <div class="team-card" id="cardHome"></div>
+      <div class="team-card" id="cardAway"></div>
+    </div>
+
+    <!-- RESULTS -->
+    <div id="results" class="hidden">
+      <div class="verdict" id="verdict">
+        <div class="verdict-label" id="verdictLabel"></div>
+        <div class="verdict-sub" id="verdictSub"></div>
+      </div>
+      <div class="grid3" style="margin-bottom:14px">
+        <div class="card"><div class="card-label">xG Casa</div><div class="card-value" id="rxgH" style="color:var(--blue)"></div><div class="card-sub">proxy tiri in porta</div></div>
+        <div class="card"><div class="card-label">xG Ospite</div><div class="card-value" id="rxgA" style="color:var(--green)"></div><div class="card-sub">proxy tiri in porta</div></div>
+        <div class="card"><div class="card-label">xG Totale</div><div class="card-value" id="rxgTot"></div><div class="card-sub" id="rxgTotSub"></div></div>
+      </div>
+      <div class="grid2" style="margin-bottom:14px">
+        <div class="card">
+          <div class="card-label">🎯 Risultato Più Probabile</div>
+          <div class="card-value" id="rScore" style="font-size:36px;color:var(--amber)"></div>
+          <div class="card-sub" id="rScorePct"></div>
+        </div>
+        <div class="card">
+          <div class="card-label">Angoli</div>
+          <div class="card-value" id="rCorner" style="font-size:18px"></div>
+          <div class="card-sub" id="rCornerSub"></div>
+          <div style="margin-top:8px"><div class="bar-wrap"><div class="bar-fill" id="rCornerBar"></div></div></div>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-label" style="margin-bottom:12px">Probabilità 1X2 — Poisson</div>
+        <div class="grid3" id="prob1x2"></div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-label" style="margin-bottom:12px">🔮 Top 5 Risultati Esatti</div>
+        <div id="topScores"></div>
+      </div>
+      <div class="disclaimer">
+        * xG stimato: tiri in porta × 0.33 (proxy — piano free API-Football non include xG nativo) · Solo uso analitico/educativo
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ─── STATE ─────────────────────────────────────────────────────────────────
+let API_KEY = '';
+let currentTab = 'search';
+let todayLoaded = false;
+
+// ─── API-FOOTBALL ───────────────────────────────────────────────────────────
+const AF = 'https://api-football-v1.p.rapidapi.com/v3';
+
+async function afFetch(path, params) {
+  const url = new URL(`${AF}/${path}`);
+  Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, String(v)));
+  const r = await fetch(url.toString(), {
+    headers: {
+      'x-rapidapi-host': 'api-football-v1.p.rapidapi.com',
+      'x-rapidapi-key':  API_KEY,
+    }
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const data = await r.json();
+  if (data.errors && Object.keys(data.errors).length > 0)
+    throw new Error(Object.values(data.errors)[0]);
+  return data.response;
+}
+
+async function searchTeam(name) {
+  const res = await afFetch('teams', { search: name });
+  if (!res.length) throw new Error(`Squadra "${name}" non trovata`);
+  return res[0].team;
+}
+
+async function getRecentFixtures(teamId) {
+  return afFetch('fixtures', { team: teamId, last: 5 });
+}
+
+async function getFixtureStats(fixtureId) {
+  return afFetch('fixtures/statistics', { fixture: fixtureId });
+}
+
+async function getTodayFixtures() {
+  const today = new Date().toISOString().slice(0,10);
+  return afFetch('fixtures', { date: today });
+}
+
+function statVal(stats, teamName, statName) {
+  const t = stats.find(s => s.team.name === teamName);
+  if (!t) return null;
+  const s = t.statistics.find(s => s.type === statName);
+  return s?.value ?? null;
+}
+
+// ─── TEAM PROFILE ──────────────────────────────────────────────────────────
+async function buildTeamProfile(teamName) {
+  log(`🔍 Cerco "${teamName}"…`);
+  const team = await searchTeam(teamName);
+  log(`✅ Trovata: ${team.name} (ID ${team.id})`);
+
+  log(`📊 Carico ultimi 5 match…`);
+  const fixtures = await getRecentFixtures(team.id);
+  if (!fixtures.length) throw new Error(`Nessuna partita recente per ${team.name}`);
+  log(`✅ ${fixtures.length} partite caricate`);
+
+  let totalGF=0, totalGA=0, totalCorners=0, totalShots=0, totalShotsOn=0;
+  let wins=0, draws=0, losses=0;
+  const details = [];
+
+  for (const fix of fixtures) {
+    const isHome = fix.teams.home.id === team.id;
+    const gf = (isHome ? fix.goals.home : fix.goals.away) ?? 0;
+    const ga = (isHome ? fix.goals.away : fix.goals.home) ?? 0;
+    const opp = isHome ? fix.teams.away.name : fix.teams.home.name;
+    totalGF += gf; totalGA += ga;
+    if (gf > ga) wins++; else if (gf === ga) draws++; else losses++;
+
+    try {
+      log(`  ⚡ Stats: ${fix.teams.home.name} vs ${fix.teams.away.name}`);
+      const stats = await getFixtureStats(fix.fixture.id);
+      const corners  = statVal(stats, team.name, 'Corner Kicks') ?? 0;
+      const shots    = statVal(stats, team.name, 'Total Shots') ?? 0;
+      const shotsOn  = statVal(stats, team.name, 'Shots on Goal') ?? 0;
+      totalCorners += corners; totalShots += shots; totalShotsOn += shotsOn;
+      details.push({ opp, gf, ga, corners, shotsOn, date: fix.fixture.date?.slice(0,10) });
+    } catch(e) {
+      details.push({ opp, gf, ga, corners: null, shotsOn: null, date: fix.fixture.date?.slice(0,10) });
+    }
+  }
+
+  const n = fixtures.length;
+  return {
+    teamName: team.name,
+    teamLogo: team.logo,
+    avgGF:      totalGF / n,
+    avgGA:      totalGA / n,
+    avgCorners: totalCorners / n,
+    avgShotsOn: totalShotsOn / n,
+    avgXG:      (totalShotsOn / n) * 0.33,
+    form: { wins, draws, losses, played: n },
+    details,
+  };
+}
+
+// ─── POISSON ───────────────────────────────────────────────────────────────
+function poissonP(lam, k) {
+  let r = Math.exp(-lam);
+  for (let i = 0; i < k; i++) r *= lam / (i + 1);
+  return r;
+}
+function topScores(xgH, xgA, n=5) {
+  const s = [];
+  for (let h = 0; h <= 7; h++)
+    for (let a = 0; a <= 7; a++)
+      s.push({ h, a, p: poissonP(xgH,h) * poissonP(xgA,a) });
+  return s.sort((a,b) => b.p - a.p).slice(0, n);
+}
+function probs1x2(xgH, xgA) {
+  let w=0, d=0, l=0;
+  for (let h = 0; h <= 10; h++)
+    for (let a = 0; a <= 10; a++) {
+      const p = poissonP(xgH,h) * poissonP(xgA,a);
+      if (h>a) w+=p; else if (h===a) d+=p; else l+=p;
+    }
+  const t = w+d+l;
+  return { p1: Math.round(w/t*100), px: Math.round(d/t*100), p2: Math.round(l/t*100) };
+}
+
+// ─── VERDETTO (logica xlsx) ─────────────────────────────────────────────────
+function getVerdetto(xgTot, assenze, gfH, gfA, cornTot, motiv, pressione, market) {
+  if (assenze > 7)  return { label:'⚠️ NO BET', sub:'Assenze gravi Casa',         color:'#e84444' };
+  if (assenze < -7) return { label:'⚠️ NO BET', sub:'Assenze gravi Ospite',        color:'#e84444' };
+  if (xgTot > 2.6 && market === 'DOWN') return { label:'🔥 OVER 2.5 + GOAL', sub:'xG alto + mercato DOWN',  color:'#f0a500' };
+  if (xgTot > 1.9 && gfH > gfA && motiv > 5) return { label:'💎 PUNTA FAVORITA (1)', sub:'Casa in forma + motivazione', color:'#3ecf60' };
+  if (xgTot > 1.9 && gfA > gfH && motiv < -5) return { label:'💎 PUNTA FAVORITA (2)', sub:'Ospite in forma + motivazione', color:'#3ecf60' };
+  if (xgTot < 1.6 && pressione > 7 && motiv === 0) return { label:'🤝 X + UNDER 3.5', sub:'Equilibrio + alta pressione', color:'#4da6ff' };
+  if (cornTot > 10.5 && market === 'DOWN') return { label:'🚩 OVER 9.5 CORNER', sub:'Volume corner + DOWN', color:'#f0a500' };
+  if (xgTot > 2.2) return { label:'⚽ OVER 1.5 / GOAL', sub:'xG medio-alto', color:'#4da6ff' };
+  return { label:'🛡️ UNDER 2.5 (Safe)', sub:'Partita da basso scoring', color:'#8a9080' };
+}
+function getCornerV(tot) {
+  if (tot >= 11)  return { label:'🔥 OVER 10.5', color:'#f0a500' };
+  if (tot >= 9.5) return { label:'📈 OVER 9.5',  color:'#3ecf60' };
+  if (tot >= 8.5) return { label:'✅ OVER 8.5',  color:'#4da6ff' };
+  if (tot < 7.5)  return { label:'🚩 UNDER 7.5', color:'#8a9080' };
+  return               { label:'⚖️ 7–9 RANGE',  color:'#8a9080' };
+}
+
+// ─── UI HELPERS ────────────────────────────────────────────────────────────
+function log(msg) {
+  const box = document.getElementById('logBox');
+  box.classList.add('visible');
+  box.innerHTML += `<div>${msg}</div>`;
+  box.scrollTop = box.scrollHeight;
+}
+function clearLog() {
+  const box = document.getElementById('logBox');
+  box.innerHTML = '';
+  box.classList.remove('visible');
+}
+
+function renderTeamCard(el, d) {
+  const badges = [
+    ...Array(d.form.wins).fill('<span class="badge badge-w">V</span>'),
+    ...Array(d.form.draws).fill('<span class="badge badge-d">P</span>'),
+    ...Array(d.form.losses).fill('<span class="badge badge-l">S</span>'),
+  ].join('');
+
+  const history = d.details.map(m => {
+    const cls = m.gf > m.ga ? 'score-w' : m.gf === m.ga ? 'score-d' : 'score-l';
+    const cornerStr = m.corners !== null ? `<span style="color:var(--blue)">🚩${m.corners}</span>` : '';
+    return `<div class="history-row">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px">vs ${m.opp}</span>
+      <span class="history-score ${cls}">${m.gf}–${m.ga}</span>
+      ${cornerStr}
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
+      ${d.teamLogo ? `<img src="${d.teamLogo}" style="width:20px;height:20px;object-fit:contain">` : ''}
+      <span class="team-name">${d.teamName}</span>
+    </div>
+    <div class="team-meta">ultimi ${d.form.played} match</div>
+    <div class="grid3" style="margin-bottom:8px">
+      <div><div class="mini-stat-label">xG/m*</div><div class="mini-stat-value" style="color:var(--amber)">${d.avgXG.toFixed(2)}</div></div>
+      <div><div class="mini-stat-label">Gol/m</div><div class="mini-stat-value" style="color:var(--green)">${d.avgGF.toFixed(1)}</div></div>
+      <div><div class="mini-stat-label">Corn/m</div><div class="mini-stat-value" style="color:var(--blue)">${d.avgCorners.toFixed(1)}</div></div>
+    </div>
+    <div>${badges}</div>
+    <div style="margin-top:10px">${history}</div>
+  `;
+}
+
+function renderResults(xgH, xgA, hd, ad) {
+  const assenze   = +document.getElementById('inAssenze').value;
+  const pressione = +document.getElementById('inPressione').value;
+  const motiv     = +document.getElementById('inMotiv').value;
+  const market    = document.getElementById('inMarket').value;
+
+  const xgTot  = xgH + xgA;
+  const cornTot = hd.avgCorners + ad.avgCorners;
+  const v  = getVerdetto(xgTot, assenze, hd.avgGF, ad.avgGF, cornTot, motiv, pressione, market);
+  const cv = getCornerV(cornTot);
+  const scores = topScores(xgH, xgA);
+  const { p1, px, p2 } = probs1x2(xgH, xgA);
+
+  // Verdict
+  const verdEl = document.getElementById('verdict');
+  verdEl.style.borderColor = v.color;
+  verdEl.style.boxShadow = `0 0 20px ${v.color}1a`;
+  document.getElementById('verdictLabel').style.color = v.color;
+  document.getElementById('verdictLabel').textContent = v.label;
+  document.getElementById('verdictSub').textContent = v.sub;
+
+  // xG cards
+  document.getElementById('rxgH').textContent = xgH.toFixed(2);
+  document.getElementById('rxgA').textContent = xgA.toFixed(2);
+  const totEl = document.getElementById('rxgTot');
+  totEl.textContent = xgTot.toFixed(2);
+  totEl.style.color = xgTot >= 2.5 ? '#f0a500' : '#8a9080';
+  document.getElementById('rxgTotSub').textContent = xgTot >= 2.5 ? 'OVER 2.5 atteso' : 'UNDER 2.5 atteso';
+
+  // Score
+  document.getElementById('rScore').textContent = `${scores[0].h}–${scores[0].a}`;
+  document.getElementById('rScorePct').textContent = `probabilità ${(scores[0].p*100).toFixed(1)}%`;
+
+  // Corner
+  document.getElementById('rCorner').textContent = cv.label;
+  document.getElementById('rCorner').style.color = cv.color;
+  document.getElementById('rCornerSub').textContent = `media ${cornTot.toFixed(1)} corner/match`;
+  const barPct = Math.min(100, (cornTot/14)*100);
+  document.getElementById('rCornerBar').style.width = barPct + '%';
+  document.getElementById('rCornerBar').style.background = cv.color;
+
+  // 1X2
+  document.getElementById('prob1x2').innerHTML = [
+    { l:'1 – Casa', v:p1, c:'#4da6ff' },
+    { l:'X – Pari', v:px, c:'#8a9080' },
+    { l:'2 – Ospite', v:p2, c:'#3ecf60' },
+  ].map(({l,v,c}) => `
+    <div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+        <span style="font-size:11px;color:var(--mid)">${l}</span>
+        <span style="font-size:13px;font-weight:700;color:${c};font-family:'JetBrains Mono',monospace">${v}%</span>
+      </div>
+      <div class="bar-wrap"><div class="bar-fill" style="width:${v}%;background:${c}"></div></div>
+    </div>
+  `).join('');
+
+  // Top 5 scores
+  const maxP = scores[0].p;
+  document.getElementById('topScores').innerHTML = scores.map(({h,a,p},i) => `
+    <div class="score-row">
+      <div class="score-rank ${i===0?'top':''}">${i+1}</div>
+      <div class="score-val ${i===0?'top':''}">${h}–${a}</div>
+      <div style="flex:1">
+        <div class="bar-wrap">
+          <div class="bar-fill" style="width:${(p/maxP)*100}%;background:${i===0?'#f0a500':'#7d5600'}"></div>
+        </div>
+      </div>
+      <div class="score-pct">${(p*100).toFixed(1)}%</div>
+    </div>
+  `).join('');
+
+  document.getElementById('results').classList.remove('hidden');
+}
+
+// ─── ANALYZE ───────────────────────────────────────────────────────────────
+async function analyze() {
+  const home = document.getElementById('homeInput').value.trim();
+  const away = document.getElementById('awayInput').value.trim();
+  if (!home || !away) return;
+
+  const btn = document.getElementById('btnAnalyze');
+  btn.disabled = true;
+  btn.textContent = '⏳ Carico dati live…';
+  clearLog();
+  document.getElementById('teamCards').classList.add('hidden');
+  document.getElementById('results').classList.add('hidden');
+
+  try {
+    const hd = await buildTeamProfile(home);
+    renderTeamCard(document.getElementById('cardHome'), hd);
+
+    const ad = await buildTeamProfile(away);
+    renderTeamCard(document.getElementById('cardAway'), ad);
+
+    document.getElementById('teamCards').classList.remove('hidden');
+
+    log('🔮 Calcolo previsione…');
+    const xgH = Math.max(0.05, hd.avgXG);
+    const xgA = Math.max(0.05, ad.avgXG);
+    renderResults(xgH, xgA, hd, ad);
+    log('✅ Analisi completata.');
+
+  } catch(err) {
+    log(`💥 Errore: ${err.message}`);
+  }
+
+  btn.disabled = false;
+  btn.textContent = '⚡ Analizza Partita';
+}
+
+// ─── TODAY'S FIXTURES ──────────────────────────────────────────────────────
+async function loadToday() {
+  const panel = document.getElementById('todayPanel');
+  panel.innerHTML = '<div style="font-size:12px;color:var(--mid)">⏳ Carico partite di oggi…</div>';
+  try {
+    const fixtures = await getTodayFixtures();
+    if (!fixtures.length) {
+      panel.innerHTML = '<div style="font-size:12px;color:var(--mid)">Nessuna partita trovata per oggi.</div>';
+      return;
+    }
+    // Group by league
+    const byLeague = {};
+    fixtures.forEach(f => {
+      const k = `${f.league.country} · ${f.league.name}`;
+      if (!byLeague[k]) byLeague[k] = [];
+      byLeague[k].push(f);
+    });
+
+    let html = '';
+    Object.entries(byLeague).forEach(([league, matches]) => {
+      html += `<div class="league-header">${league}</div>`;
+      matches.forEach(f => {
+        const time = f.fixture.date
+          ? new Date(f.fixture.date).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'})
+          : '--:--';
+        const status = f.fixture.status?.short;
+        const isLive = ['1H','HT','2H','ET','P'].includes(status);
+        const score = (f.goals.home !== null && f.goals.away !== null)
+          ? `<span style="color:var(--amber);font-weight:700;font-family:'JetBrains Mono',monospace">${f.goals.home}–${f.goals.away}</span>`
+          : `<span class="fixture-time">${time}</span>`;
+        html += `
+          <button class="fixture-item" onclick="selectFixture('${f.teams.home.name.replace(/'/g,"\\'")}','${f.teams.away.name.replace(/'/g,"\\'")}')">
+            <span style="font-weight:600">${f.teams.home.name}</span>
+            ${isLive ? `<span style="color:var(--red);font-size:10px;margin:0 6px">🔴 LIVE</span>` : score}
+            <span style="font-weight:600">${f.teams.away.name}</span>
+          </button>`;
+      });
+    });
+    panel.innerHTML = html;
+    todayLoaded = true;
+  } catch(err) {
+    panel.innerHTML = `<div style="font-size:12px;color:var(--red)">💥 ${err.message}</div>`;
+  }
+}
+
+function selectFixture(home, away) {
+  document.getElementById('homeInput').value = home;
+  document.getElementById('awayInput').value = away;
+  switchTab('search');
+}
+
+// ─── TABS ──────────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  currentTab = tab;
+  document.getElementById('tabSearch').className = 'tab' + (tab==='search'?' active':'');
+  document.getElementById('tabToday').className  = 'tab' + (tab==='today'?' active':'');
+  document.getElementById('paneSearch').classList.toggle('hidden', tab!=='search');
+  document.getElementById('paneToday').classList.toggle('hidden',  tab!=='today');
+  if (tab === 'today' && !todayLoaded) loadToday();
+}
+
+// ─── API KEY ───────────────────────────────────────────────────────────────
+function saveKey() {
+  const key = document.getElementById('apiKeyInput').value.trim();
+  if (!key) return;
+  API_KEY = key;
+
+  document.getElementById('btnSave').textContent = '✓ Salvata';
+  document.getElementById('btnSave').className = 'btn-save saved';
+  document.getElementById('apiMsg').innerHTML = '✓ Key attiva — le chiamate avvengono direttamente dal tuo browser.';
+  document.getElementById('apiMsg').style.color = 'var(--green)';
+  document.getElementById('apiPanel').style.borderColor = '#3ecf6044';
+
+  document.getElementById('statusDot').classList.add('on');
+  document.getElementById('statusLabel').classList.add('on');
+  document.getElementById('statusLabel').textContent = 'API-FOOTBALL CONNESSA · DATI LIVE';
+  document.getElementById('mainContent').classList.remove('hidden');
+}
+
+// Enter key on inputs
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    if (document.activeElement.id === 'apiKeyInput') saveKey();
+    if (['homeInput','awayInput'].includes(document.activeElement.id)) analyze();
+  }
+});
+</script>
+</body>
+</html>
