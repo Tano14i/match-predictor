@@ -380,6 +380,7 @@
       <div class="card" style="margin-bottom:14px">
         <div class="card-label" style="margin-bottom:12px">🔮 Top 5 Risultati Esatti</div>
         <div id="topScores"></div>
+        <div style="font-size:10px;color:var(--dim);margin-top:8px">Aspettativa realistica (dati storici, backtest/score_calibration.py): il risultato esatto e' il #1 di questa lista nel 9% dei casi, ma e' tra questi 5 nel 45% dei casi — il calcio ha troppi punteggi possibili perche' anche un modello onesto "indovini" spesso il singolo risultato esatto.</div>
       </div>
       <div class="disclaimer">
         * xG stimato: tiri in porta × 0.33 (proxy — piano free API-Football non include xG nativo) · EV corner da Poisson non fittato su dati storici (sovradispersione reale non modellata) · Solo uso analitico/educativo
@@ -1011,6 +1012,22 @@ function calibrateOverUnder(over) {
   return { over: cOver, under: 1 - cOver };
 }
 
+// Calibrazione del RISULTATO ESATTO (pick #1 della griglia Poisson+Dixon-
+// Coles): stessa idea di CALIBRATION_MAP, ma validata solo sulla
+// probabilita' del punteggio piu' probabile (top1), non sugli altri 4
+// mostrati in classifica — per quelli non abbiamo verificato la
+// calibrazione, quindi restano grezzi. Griglia 0..50% (oltre il 15%
+// grezzo il modello era molto sovrastimato: dichiarava ~20%, succedeva
+// ~9.5% delle volte — vedi backtest/score_calibration.py).
+const SCORE_CALIBRATION = [0.0100,0.0100,0.0100,0.0100,0.0100,0.0100,0.0100,0.0100,0.0100,0.0100,0.0100,0.0100,0.0100,0.0100,0.0714,0.0714,0.0714,0.0755,0.0784,0.0784,0.0857,0.1015,0.1015,0.1015,0.1175,0.1228,0.1228,0.1320,0.1320,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378,0.1378];
+
+function calibrateScoreProb(rawProb) {
+  const x = Math.max(0, Math.min(0.5, rawProb)) * 200; // griglia 0..0.5 in 101 punti (passo 0.005)
+  const i0 = Math.floor(x), i1 = Math.min(100, i0 + 1);
+  const frac = x - i0;
+  return SCORE_CALIBRATION[i0] * (1 - frac) + SCORE_CALIBRATION[i1] * frac;
+}
+
 // P(Under/Over line) da una Poisson pura di media `mean` — usata per i
 // corner totali (somma casa+trasferta). A differenza dei gol, nessuna
 // correzione Dixon-Coles: quella corregge la correlazione tra due variabili
@@ -1340,9 +1357,12 @@ function renderResults(xgH, xgA, hd, ad, xgSource = 'proxy') {
   totEl.style.color = xgTot >= 2.5 ? '#f0a500' : '#8a9080';
   document.getElementById('rxgTotSub').textContent = xgTot >= 2.5 ? 'OVER 2.5 atteso' : 'UNDER 2.5 atteso';
 
-  // Score
+  // Score — solo il #1 e' calibrato (validato su score_calibration.py); i
+  // successivi 4 nella lista "Top 5" restano sulla probabilita' grezza,
+  // mai verificata individualmente.
+  const scoreTop1Cal = calibrateScoreProb(scores[0].p);
   document.getElementById('rScore').textContent = `${scores[0].h}–${scores[0].a}`;
-  document.getElementById('rScorePct').textContent = `probabilità ${(scores[0].p*100).toFixed(1)}%`;
+  document.getElementById('rScorePct').textContent = `probabilità ${(scoreTop1Cal*100).toFixed(1)}%`;
 
   // Corner
   document.getElementById('rCorner').textContent = cv.label;
@@ -1378,7 +1398,7 @@ function renderResults(xgH, xgA, hd, ad, xgSource = 'proxy') {
           <div class="bar-fill" style="width:${(p/maxP)*100}%;background:${i===0?'#f0a500':'#7d5600'}"></div>
         </div>
       </div>
-      <div class="score-pct">${(p*100).toFixed(1)}%</div>
+      <div class="score-pct">${((i===0 ? scoreTop1Cal : p)*100).toFixed(1)}%</div>
     </div>
   `).join('');
 
