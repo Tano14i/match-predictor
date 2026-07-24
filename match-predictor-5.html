@@ -167,6 +167,15 @@
   /* DIVIDER */
   .divider { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px; }
 
+  /* ODDS TABLE (multi-bookmaker) */
+  .odds-table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 8px; }
+  .odds-table th { padding: 4px 3px; color: var(--mid); font-weight: 600; font-size: 10px; text-align: center; }
+  .odds-table th:first-child { text-align: left; }
+  .odds-table td { padding: 3px; }
+  .odds-table td:first-child { color: var(--mid); font-size: 10px; white-space: nowrap; padding-right: 6px; }
+  .odds-table input { padding: 6px 4px; font-size: 12px; text-align: center; }
+  .odds-table tr.market-sep td { padding-top: 10px; }
+
   /* DISCLAIMER */
   .disclaimer { font-size: 10px; color: var(--dim); text-align: center; line-height: 1.6; margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--border); }
 
@@ -264,16 +273,39 @@
           </div>
         </div>
         <div class="divider">
-          <span class="lbl">💰 Quote (opzionale — senza queste, solo analisi, nessun pick di valore)</span>
-          <div class="grid3" style="margin-top:6px;margin-bottom:8px">
-            <div><span class="lbl">Quota 1 (Casa)</span><input type="number" step="0.01" id="odds1" placeholder="es. 1.85" /></div>
-            <div><span class="lbl">Quota X</span><input type="number" step="0.01" id="oddsX" placeholder="es. 3.40" /></div>
-            <div><span class="lbl">Quota 2 (Ospite)</span><input type="number" step="0.01" id="odds2" placeholder="es. 4.20" /></div>
-          </div>
-          <div class="grid2">
-            <div><span class="lbl">Quota Over 2.5</span><input type="number" step="0.01" id="oddsOver" placeholder="es. 1.90" /></div>
-            <div><span class="lbl">Quota Under 2.5</span><input type="number" step="0.01" id="oddsUnder" placeholder="es. 1.90" /></div>
-          </div>
+          <span class="lbl">💰 Quote per bookmaker (opzionale — il tool usa sempre la migliore tra le tre)</span>
+          <table class="odds-table">
+            <thead>
+              <tr><th></th><th>Bet365</th><th>Sisal</th><th>Toto</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>1 (Casa)</td>
+                <td><input type="number" step="0.01" id="odds_1_bet365" placeholder="1.85" /></td>
+                <td><input type="number" step="0.01" id="odds_1_sisal" placeholder="1.85" /></td>
+                <td><input type="number" step="0.01" id="odds_1_toto" placeholder="1.85" /></td>
+              </tr>
+              <tr><td>X</td>
+                <td><input type="number" step="0.01" id="odds_X_bet365" placeholder="3.40" /></td>
+                <td><input type="number" step="0.01" id="odds_X_sisal" placeholder="3.40" /></td>
+                <td><input type="number" step="0.01" id="odds_X_toto" placeholder="3.40" /></td>
+              </tr>
+              <tr><td>2 (Ospite)</td>
+                <td><input type="number" step="0.01" id="odds_2_bet365" placeholder="4.20" /></td>
+                <td><input type="number" step="0.01" id="odds_2_sisal" placeholder="4.20" /></td>
+                <td><input type="number" step="0.01" id="odds_2_toto" placeholder="4.20" /></td>
+              </tr>
+              <tr class="market-sep"><td>Over 2.5</td>
+                <td><input type="number" step="0.01" id="odds_over_bet365" placeholder="1.90" /></td>
+                <td><input type="number" step="0.01" id="odds_over_sisal" placeholder="1.90" /></td>
+                <td><input type="number" step="0.01" id="odds_over_toto" placeholder="1.90" /></td>
+              </tr>
+              <tr><td>Under 2.5</td>
+                <td><input type="number" step="0.01" id="odds_under_bet365" placeholder="1.90" /></td>
+                <td><input type="number" step="0.01" id="odds_under_sisal" placeholder="1.90" /></td>
+                <td><input type="number" step="0.01" id="odds_under_toto" placeholder="1.90" /></td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
       <button class="btn-primary" id="btnAnalyze" onclick="analyze()">⚡ Analizza Partita</button>
@@ -727,6 +759,43 @@ function evaluateValue(probs, oddsArr, labels) {
   return { hasOdds: true, implied, ev, pick };
 }
 
+// ─── MULTI-BOOKMAKER: prezzo migliore + arbitraggio ─────────────────────────
+const BOOKMAKERS = [{ key: 'bet365', label: 'Bet365' }, { key: 'sisal', label: 'Sisal' }, { key: 'toto', label: 'Toto' }];
+
+function readBookmakerOdds(marketKey) {
+  const vals = {};
+  for (const bk of BOOKMAKERS) {
+    const el = document.getElementById(`odds_${marketKey}_${bk.key}`);
+    const v = el ? +el.value : NaN;
+    vals[bk.key] = (v && v > 1) ? v : null;
+  }
+  return vals;
+}
+// Prezzo migliore (piu' alto) tra i bookmaker inseriti per un singolo esito,
+// con la fonte. Non serve nessuna previsione piu' intelligente per questo:
+// puntare sempre al prezzo migliore disponibile e' il vantaggio piu' solido
+// e "gratuito" nel betting, puramente meccanico (line shopping).
+function bestBookmakerOdds(vals) {
+  let best = null, bestKey = null;
+  for (const bk of BOOKMAKERS) {
+    const v = vals[bk.key];
+    if (v != null && (best === null || v > best)) { best = v; bestKey = bk.key; }
+  }
+  const label = bestKey ? BOOKMAKERS.find(b => b.key === bestKey).label : null;
+  return { odds: best, bookmaker: label };
+}
+// Arbitraggio: se la somma delle probabilita' implicite dai MIGLIORI prezzi
+// (uno per bookmaker diverso, potenzialmente) su TUTTI gli esiti di un
+// mercato e' sotto 1, puntando su ognuno in proporzione il profitto e'
+// garantito indipendentemente dal risultato — a differenza di un "value
+// pick", non dipende dal modello avere ragione. Raro sui campionati
+// principali con solo 3 bookmaker, ma calcolabile in automatico.
+function checkArbitrage(bestOddsArr) {
+  if (bestOddsArr.some(o => !o || o <= 1)) return null;
+  const impliedSum = bestOddsArr.reduce((s, o) => s + 1/o, 0);
+  return { isArbitrage: impliedSum < 1, profitPct: impliedSum < 1 ? (1/impliedSum - 1) * 100 : null };
+}
+
 // ─── VERDETTO (logica xlsx) ─────────────────────────────────────────────────
 function getVerdetto(xgTot, assenze, gfH, gfA, cornTot, motiv, pressione, market) {
   if (assenze > 7)  return { label:'⚠️ NO BET', sub:'Assenze gravi Casa',         color:'#e84444' };
@@ -811,17 +880,37 @@ function fmtPct(x) {
 }
 
 function renderEV(wProb, dProb, lProb, xgH, xgA, homeSuspect, awaySuspect, homeLowSample, awayLowSample) {
-  const odds1 = +document.getElementById('odds1').value || null;
-  const oddsX = +document.getElementById('oddsX').value || null;
-  const odds2 = +document.getElementById('odds2').value || null;
-  const oddsOver = +document.getElementById('oddsOver').value || null;
-  const oddsUnder = +document.getElementById('oddsUnder').value || null;
+  const b1 = bestBookmakerOdds(readBookmakerOdds('1'));
+  const bX = bestBookmakerOdds(readBookmakerOdds('X'));
+  const b2 = bestBookmakerOdds(readBookmakerOdds('2'));
+  const bOver = bestBookmakerOdds(readBookmakerOdds('over'));
+  const bUnder = bestBookmakerOdds(readBookmakerOdds('under'));
+  const bookmakerByLabel = {
+    '1 (Casa)': b1.bookmaker, 'X (Pareggio)': bX.bookmaker, '2 (Ospite)': b2.bookmaker,
+    'Over 2.5': bOver.bookmaker, 'Under 2.5': bUnder.bookmaker,
+  };
 
-  const ev1x2 = evaluateValue([wProb, dProb, lProb], [odds1, oddsX, odds2], ['1 (Casa)', 'X (Pareggio)', '2 (Ospite)']);
+  const ev1x2 = evaluateValue([wProb, dProb, lProb], [b1.odds, bX.odds, b2.odds], ['1 (Casa)', 'X (Pareggio)', '2 (Ospite)']);
   const { over, under } = probOverUnderGoals(xgH, xgA, 2.5);
-  const evGoals = evaluateValue([over, under], [oddsOver, oddsUnder], ['Over 2.5', 'Under 2.5']);
+  const evGoals = evaluateValue([over, under], [bOver.odds, bUnder.odds], ['Over 2.5', 'Under 2.5']);
 
   const blocks = [];
+
+  // Arbitraggio: matematico puro, non dipende dal modello — controllato per
+  // primo, prima di qualunque EV. Serve il prezzo migliore su TUTTI gli
+  // esiti di un mercato (potenzialmente da bookmaker diversi tra loro).
+  const arb1x2 = checkArbitrage([b1.odds, bX.odds, b2.odds]);
+  const arbGoals = checkArbitrage([bOver.odds, bUnder.odds]);
+  if (arb1x2?.isArbitrage || arbGoals?.isArbitrage) {
+    const which = [
+      arb1x2?.isArbitrage ? `1X2 (+${arb1x2.profitPct.toFixed(1)}%)` : null,
+      arbGoals?.isArbitrage ? `Over/Under 2.5 (+${arbGoals.profitPct.toFixed(1)}%)` : null,
+    ].filter(Boolean).join(', ');
+    blocks.push(`<div style="background:#3ecf6022;border:1px solid #3ecf6088;border-radius:6px;padding:8px 10px;margin-bottom:10px;color:var(--green);font-weight:700;font-size:11px">
+      💎 ARBITRAGGIO su ${which} — puntando su ogni esito nel bookmaker con la quota migliore, il profitto è garantito indipendentemente dal risultato. Ricontrolla le quote prima di piazzare: sono inserite a mano, un errore di battitura può renderlo falso.
+    </div>`);
+  }
+
   // Avviso in cima, prima di qualunque EV/pick: un pick calcolato su xG
   // costruito da dati tiri mancanti (vedi buildTeamProfile/xgDataSuspect)
   // NON e' valore reale, e' rumore che sembra un edge enorme. Visto dal
@@ -846,25 +935,29 @@ function renderEV(wProb, dProb, lProb, xgH, xgA, homeSuspect, awaySuspect, homeL
   }
   if (ev1x2.hasOdds) {
     blocks.push(`<div style="margin-bottom:8px">
-      <div style="font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:3px">1X2</div>
-      EV: 1 ${fmtPct(ev1x2.ev[0])} &nbsp;·&nbsp; X ${fmtPct(ev1x2.ev[1])} &nbsp;·&nbsp; 2 ${fmtPct(ev1x2.ev[2])}
+      <div style="font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:3px">1X2 (prezzo migliore tra i bookmaker inseriti)</div>
+      EV: 1 ${fmtPct(ev1x2.ev[0])}${b1.bookmaker ? ` (${b1.bookmaker})` : ''} &nbsp;·&nbsp;
+      X ${fmtPct(ev1x2.ev[1])}${bX.bookmaker ? ` (${bX.bookmaker})` : ''} &nbsp;·&nbsp;
+      2 ${fmtPct(ev1x2.ev[2])}${b2.bookmaker ? ` (${b2.bookmaker})` : ''}
     </div>`);
   }
   if (evGoals.hasOdds) {
     blocks.push(`<div style="margin-bottom:8px">
-      <div style="font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:3px">Over/Under 2.5 gol</div>
-      EV: Over ${fmtPct(evGoals.ev[0])} &nbsp;·&nbsp; Under ${fmtPct(evGoals.ev[1])}
+      <div style="font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:3px">Over/Under 2.5 gol (prezzo migliore tra i bookmaker inseriti)</div>
+      EV: Over ${fmtPct(evGoals.ev[0])}${bOver.bookmaker ? ` (${bOver.bookmaker})` : ''} &nbsp;·&nbsp;
+      Under ${fmtPct(evGoals.ev[1])}${bUnder.bookmaker ? ` (${bUnder.bookmaker})` : ''}
     </div>`);
   }
 
   if (!ev1x2.hasOdds && !evGoals.hasOdds) {
-    blocks.push('Inserisci le quote (1X2 e/o Over/Under 2.5) per calcolare il valore atteso — senza quote e\' solo analisi, nessun pick.');
+    blocks.push('Inserisci le quote di almeno un bookmaker (1X2 e/o Over/Under 2.5) per calcolare il valore atteso — senza quote e\' solo analisi, nessun pick.');
   } else {
     const picks = [ev1x2.pick, evGoals.pick].filter(Boolean);
     if (picks.length) {
-      blocks.push(picks.map(p =>
-        `<div style="color:var(--green);font-weight:700;margin-top:4px">✅ VALUE PICK: ${escapeHtml(p.label)} @ ${p.odds} (edge ${fmtPct(p.edge)})</div>`
-      ).join(''));
+      blocks.push(picks.map(p => {
+        const bk = bookmakerByLabel[p.label];
+        return `<div style="color:var(--green);font-weight:700;margin-top:4px">✅ VALUE PICK: ${escapeHtml(p.label)} @ ${p.odds}${bk ? ` (${bk})` : ''} (edge ${fmtPct(p.edge)})</div>`;
+      }).join(''));
     } else {
       blocks.push(`<div style="color:var(--dim);margin-top:4px">⛔ Nessun lato supera il margine minimo (${(MIN_EDGE*100).toFixed(0)}%) — nessun pick di valore su questi mercati.</div>`);
     }
