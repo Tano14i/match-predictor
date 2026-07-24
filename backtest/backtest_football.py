@@ -64,15 +64,15 @@ def dixon_coles_tau(x: int, y: int, lam: float, mu: float, rho: float = DC_RHO) 
     return 1.0
 
 
-def score_prob(xg_h: float, xg_a: float, h: int, a: int) -> float:
-    return poisson_p(xg_h, h) * poisson_p(xg_a, a) * dixon_coles_tau(h, a, xg_h, xg_a)
+def score_prob(xg_h: float, xg_a: float, h: int, a: int, rho: float = DC_RHO) -> float:
+    return poisson_p(xg_h, h) * poisson_p(xg_a, a) * dixon_coles_tau(h, a, xg_h, xg_a, rho)
 
 
-def probs_1x2_raw(xg_h: float, xg_a: float) -> tuple[float, float, float]:
+def probs_1x2_raw(xg_h: float, xg_a: float, rho: float = DC_RHO) -> tuple[float, float, float]:
     w = d = l = 0.0
     for h in range(11):
         for a in range(11):
-            p = score_prob(xg_h, xg_a, h, a)
+            p = score_prob(xg_h, xg_a, h, a, rho)
             if h > a:
                 w += p
             elif h == a:
@@ -83,12 +83,12 @@ def probs_1x2_raw(xg_h: float, xg_a: float) -> tuple[float, float, float]:
     return w / t, d / t, l / t
 
 
-def prob_over_under_goals(xg_h: float, xg_a: float, line: float) -> tuple[float, float]:
+def prob_over_under_goals(xg_h: float, xg_a: float, line: float, rho: float = DC_RHO) -> tuple[float, float]:
     max_under = math.floor(line)
     under = over = 0.0
     for h in range(11):
         for a in range(11):
-            p = score_prob(xg_h, xg_a, h, a)
+            p = score_prob(xg_h, xg_a, h, a, rho)
             if h + a <= max_under:
                 under += p
             else:
@@ -169,7 +169,7 @@ def parse_date(s: str):
 
 
 # ─── backtest walk-forward ──────────────────────────────────────────────────
-def run_backtest(rows: list[dict], min_edge: float = MIN_EDGE, odds_source: str = "Avg") -> list[dict]:
+def run_backtest(rows: list[dict], min_edge: float = MIN_EDGE, odds_source: str = "Avg", rho: float = DC_RHO) -> list[dict]:
     state: dict[str, dict] = defaultdict(new_state)
     bets = []
 
@@ -189,8 +189,8 @@ def run_backtest(rows: list[dict], min_edge: float = MIN_EDGE, odds_source: str 
         xg_h, xg_a = team_xg(hs, True), team_xg(as_, False)
 
         if xg_h is not None and xg_a is not None:
-            w, d, l = probs_1x2_raw(xg_h, xg_a)
-            over, under = prob_over_under_goals(xg_h, xg_a, 2.5)
+            w, d, l = probs_1x2_raw(xg_h, xg_a, rho)
+            over, under = prob_over_under_goals(xg_h, xg_a, 2.5, rho)
 
             odds_1x2 = [to_float(r.get(hcol)), to_float(r.get(dcol)), to_float(r.get(acol))]
             odds_goals = [to_float(r.get(ocol)), to_float(r.get(ucol))]
@@ -247,6 +247,7 @@ def main() -> int:
     ap.add_argument("--label", default=None, help="Etichetta per il report (es. 'Eredivisie')")
     ap.add_argument("--min-edge", type=float, default=MIN_EDGE, help="Margine EV minimo per piazzare una bet (default 0.05)")
     ap.add_argument("--odds-source", default="Avg", choices=["Avg", "B365", "Max", "PS"], help="Colonna quote da usare (default Avg = media di mercato)")
+    ap.add_argument("--rho", type=float, default=DC_RHO, help=f"Parametro Dixon-Coles rho da usare (default {DC_RHO} = valore da letteratura)")
     args = ap.parse_args()
 
     rows: list[dict] = []
@@ -260,9 +261,9 @@ def main() -> int:
 
     label = args.label or " + ".join(args.files)
     print(f"\nMatch totali ({label}): {len(rows)}")
-    print(f"Fonte quote: {args.odds_source} | Margine minimo: {args.min_edge*100:.0f}%")
+    print(f"Fonte quote: {args.odds_source} | Margine minimo: {args.min_edge*100:.0f}% | Dixon-Coles rho: {args.rho}")
 
-    bets = run_backtest(rows, args.min_edge, args.odds_source)
+    bets = run_backtest(rows, args.min_edge, args.odds_source, args.rho)
     result = summarize(bets)
 
     print(f"\n── RISULTATO COMPLESSIVO ({label}) ──")
