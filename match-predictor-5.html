@@ -479,6 +479,12 @@ function statVal(stats, teamName, statName) {
 // Sotto questa soglia di match in un contesto (casa/trasferta), lo split e'
 // troppo rumoroso: si resta sulla media generale.
 const MIN_SPLIT = 2;
+// Sotto questa soglia di partite con stats REALI (su un massimo di 5), l'xG
+// non e' abbastanza affidabile da fidarcisi anche se il rapporto con i gol
+// reali sembra plausibile — 1 partita di dati puo' sembrare "normale" per
+// puro caso. Distinto da xgDataSuspect: quello cattura un rapporto
+// impossibile, questo cattura "troppo pochi dati per saperlo comunque".
+const LOW_SAMPLE_THRESHOLD = 3;
 
 async function buildTeamProfile(teamName, resolvedId) {
   const cacheKey = resolvedId ? `id:${resolvedId}` : `name:${teamType}:${teamName.toLowerCase()}`;
@@ -573,6 +579,7 @@ async function buildTeamProfile(teamName, resolvedId) {
     // versione piu' estrema dello stesso problema, non un caso da escludere.
     xgDataSuspect: (totalGF / n) >= 1.0 &&
                    (totalGF / n) > ((totalShotsOn / statsN) * 0.33) * 2.5,
+    xgLowSample: statsOk < LOW_SAMPLE_THRESHOLD,
     form: { wins, draws, losses, played: n },
     details,
   };
@@ -735,7 +742,7 @@ function renderTeamCard(el, d) {
   }).join('');
 
   const coverageNote = d.statsCoverage !== `${d.form.played}/${d.form.played}`
-    ? `<div style="font-size:9px;color:var(--dim);margin-top:6px">⚠️ stats disponibili solo per ${d.statsCoverage} match — medie calcolate solo su quelli</div>`
+    ? `<div style="font-size:9px;color:${d.xgLowSample ? 'var(--amber)' : 'var(--dim)'};margin-top:6px">${d.xgLowSample ? '⚠️' : ''} stats disponibili solo per ${d.statsCoverage} match — medie calcolate solo su quelli${d.xgLowSample ? ' (campione troppo piccolo per fidarsi dell\'xG)' : ''}</div>`
     : '';
   const xgWarning = d.xgDataSuspect
     ? `<div style="font-size:9px;color:var(--red);margin-top:4px">🚨 gol reali (${d.avgGF.toFixed(1)}/m) molto più alti dell'xG stimato (${d.avgXG.toFixed(2)}/m) — probabile dato tiri mancante, NON fidarti di questo xG</div>`
@@ -763,7 +770,7 @@ function fmtPct(x) {
   return x == null ? '—' : `${x >= 0 ? '+' : ''}${(x*100).toFixed(1)}%`;
 }
 
-function renderEV(wProb, dProb, lProb, xgH, xgA, homeSuspect, awaySuspect) {
+function renderEV(wProb, dProb, lProb, xgH, xgA, homeSuspect, awaySuspect, homeLowSample, awayLowSample) {
   const odds1 = +document.getElementById('odds1').value || null;
   const oddsX = +document.getElementById('oddsX').value || null;
   const odds2 = +document.getElementById('odds2').value || null;
@@ -784,6 +791,17 @@ function renderEV(wProb, dProb, lProb, xgH, xgA, homeSuspect, awaySuspect) {
     const who = homeSuspect && awaySuspect ? 'entrambe le squadre' : homeSuspect ? 'la squadra di casa' : 'la squadra ospite';
     blocks.push(`<div style="background:#e8444422;border:1px solid #e8444466;border-radius:6px;padding:8px 10px;margin-bottom:10px;color:#ff8a8a;font-weight:600;font-size:11px">
       🚨 xG sospetto per ${who} (gol reali molto più alti dell'xG stimato) — i pick sotto sono probabilmente artefatti di dati mancanti, non valore reale. Non scommetterci sopra.
+    </div>`);
+  }
+  // Distinto dal caso sopra: qui il rapporto gol/xG puo' anche sembrare
+  // plausibile, ma solo per caso — con < 3 partite su 5 di dati reali il
+  // campione e' troppo piccolo per fidarsi comunque (visto dal vivo: Lyon
+  // con xG "sensato" basato su 1 sola partita con stats).
+  if ((homeLowSample && !homeSuspect) || (awayLowSample && !awaySuspect)) {
+    const who = (homeLowSample && !homeSuspect) && (awayLowSample && !awaySuspect)
+      ? 'entrambe le squadre' : (homeLowSample && !homeSuspect) ? 'la squadra di casa' : 'la squadra ospite';
+    blocks.push(`<div style="background:#f0a50022;border:1px solid #f0a50066;border-radius:6px;padding:8px 10px;margin-bottom:10px;color:#f0a500;font-weight:600;font-size:11px">
+      ⚠️ xG per ${who} basato su meno di ${LOW_SAMPLE_THRESHOLD} partite con dati reali (su 5) — campione troppo piccolo per fidarsi dell'edge, anche se il numero sembra plausibile.
     </div>`);
   }
   if (ev1x2.hasOdds) {
@@ -828,7 +846,7 @@ function renderResults(xgH, xgA, hd, ad) {
   const { w, d, l } = probs1x2Raw(xgH, xgA);
   const p1 = Math.round(w*100), px = Math.round(d*100), p2 = Math.round(l*100);
 
-  renderEV(w, d, l, xgH, xgA, hd.xgDataSuspect, ad.xgDataSuspect);
+  renderEV(w, d, l, xgH, xgA, hd.xgDataSuspect, ad.xgDataSuspect, hd.xgLowSample, ad.xgLowSample);
 
   // Verdict
   const verdEl = document.getElementById('verdict');
