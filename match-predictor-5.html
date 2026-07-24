@@ -274,6 +274,10 @@
         </div>
         <div class="divider">
           <span class="lbl">💰 Quote per bookmaker (opzionale — il tool usa sempre la migliore tra le tre)</span>
+          <div style="max-width:140px;margin-top:8px">
+            <span class="lbl">Linea Corner</span>
+            <input type="number" step="0.5" id="inCornerLine" value="9.5" />
+          </div>
           <table class="odds-table">
             <thead>
               <tr><th></th><th>Bet365</th><th>Sisal</th><th>Toto</th></tr>
@@ -303,6 +307,16 @@
                 <td><input type="number" step="0.01" id="odds_under_bet365" placeholder="1.90" /></td>
                 <td><input type="number" step="0.01" id="odds_under_sisal" placeholder="1.90" /></td>
                 <td><input type="number" step="0.01" id="odds_under_toto" placeholder="1.90" /></td>
+              </tr>
+              <tr class="market-sep"><td>Over Corner</td>
+                <td><input type="number" step="0.01" id="odds_cover_bet365" placeholder="1.90" /></td>
+                <td><input type="number" step="0.01" id="odds_cover_sisal" placeholder="1.90" /></td>
+                <td><input type="number" step="0.01" id="odds_cover_toto" placeholder="1.90" /></td>
+              </tr>
+              <tr><td>Under Corner</td>
+                <td><input type="number" step="0.01" id="odds_cunder_bet365" placeholder="1.90" /></td>
+                <td><input type="number" step="0.01" id="odds_cunder_sisal" placeholder="1.90" /></td>
+                <td><input type="number" step="0.01" id="odds_cunder_toto" placeholder="1.90" /></td>
               </tr>
             </tbody>
           </table>
@@ -368,7 +382,7 @@
         <div id="topScores"></div>
       </div>
       <div class="disclaimer">
-        * xG stimato: tiri in porta × 0.33 (proxy — piano free API-Football non include xG nativo) · Solo uso analitico/educativo
+        * xG stimato: tiri in porta × 0.33 (proxy — piano free API-Football non include xG nativo) · EV corner da Poisson non fittato su dati storici (sovradispersione reale non modellata) · Solo uso analitico/educativo
       </div>
     </div>
 
@@ -721,6 +735,26 @@ function probOverUnderGoals(xgH, xgA, line) {
   return { under: pUnder / t, over: pOver / t };
 }
 
+// P(Under/Over line) da una Poisson pura di media `mean` — usata per i
+// corner totali (somma casa+trasferta). A differenza dei gol, nessuna
+// correzione Dixon-Coles: quella corregge la correlazione tra due variabili
+// separate (gol casa/trasferta) nei punteggi bassi, qui e' un totale unico.
+// Limite onesto: i corner reali sono in genere leggermente piu' dispersi di
+// una Poisson pura (coda un po' piu' pesante — servirebbe una Binomiale
+// Negativa con un parametro di dispersione stimato su dati storici reali per
+// essere precisi). Senza un backtest per stimarlo, resta il modello piu'
+// semplice e verificabile, non un parametro inventato spacciato per preciso.
+function poissonOverUnder(mean, line) {
+  const maxUnder = Math.floor(line);
+  let pUnder = 0, pOver = 0;
+  for (let k = 0; k <= 40; k++) {
+    const p = poissonP(mean, k);
+    if (k <= maxUnder) pUnder += p; else pOver += p;
+  }
+  const t = pUnder + pOver;
+  return { under: pUnder / t, over: pOver / t };
+}
+
 // ─── VALORE ATTESO (EV) — probabilita' del modello vs quote reali ───────────
 // Stesso principio usato in tennisanalytics/betting.py: il verdetto qui
 // sotto (getVerdetto) NON guarda mai le quote — puo' consigliare un pick
@@ -879,20 +913,26 @@ function fmtPct(x) {
   return x == null ? '—' : `${x >= 0 ? '+' : ''}${(x*100).toFixed(1)}%`;
 }
 
-function renderEV(wProb, dProb, lProb, xgH, xgA, homeSuspect, awaySuspect, homeLowSample, awayLowSample) {
+function renderEV(wProb, dProb, lProb, xgH, xgA, cornTot, homeSuspect, awaySuspect, homeLowSample, awayLowSample) {
   const b1 = bestBookmakerOdds(readBookmakerOdds('1'));
   const bX = bestBookmakerOdds(readBookmakerOdds('X'));
   const b2 = bestBookmakerOdds(readBookmakerOdds('2'));
   const bOver = bestBookmakerOdds(readBookmakerOdds('over'));
   const bUnder = bestBookmakerOdds(readBookmakerOdds('under'));
+  const bCOver = bestBookmakerOdds(readBookmakerOdds('cover'));
+  const bCUnder = bestBookmakerOdds(readBookmakerOdds('cunder'));
+  const cornerLine = +document.getElementById('inCornerLine').value || 9.5;
   const bookmakerByLabel = {
     '1 (Casa)': b1.bookmaker, 'X (Pareggio)': bX.bookmaker, '2 (Ospite)': b2.bookmaker,
     'Over 2.5': bOver.bookmaker, 'Under 2.5': bUnder.bookmaker,
+    [`Over ${cornerLine} corner`]: bCOver.bookmaker, [`Under ${cornerLine} corner`]: bCUnder.bookmaker,
   };
 
   const ev1x2 = evaluateValue([wProb, dProb, lProb], [b1.odds, bX.odds, b2.odds], ['1 (Casa)', 'X (Pareggio)', '2 (Ospite)']);
   const { over, under } = probOverUnderGoals(xgH, xgA, 2.5);
   const evGoals = evaluateValue([over, under], [bOver.odds, bUnder.odds], ['Over 2.5', 'Under 2.5']);
+  const { over: cOver, under: cUnder } = poissonOverUnder(cornTot, cornerLine);
+  const evCorners = evaluateValue([cOver, cUnder], [bCOver.odds, bCUnder.odds], [`Over ${cornerLine} corner`, `Under ${cornerLine} corner`]);
 
   const blocks = [];
 
@@ -901,10 +941,12 @@ function renderEV(wProb, dProb, lProb, xgH, xgA, homeSuspect, awaySuspect, homeL
   // esiti di un mercato (potenzialmente da bookmaker diversi tra loro).
   const arb1x2 = checkArbitrage([b1.odds, bX.odds, b2.odds]);
   const arbGoals = checkArbitrage([bOver.odds, bUnder.odds]);
-  if (arb1x2?.isArbitrage || arbGoals?.isArbitrage) {
+  const arbCorners = checkArbitrage([bCOver.odds, bCUnder.odds]);
+  if (arb1x2?.isArbitrage || arbGoals?.isArbitrage || arbCorners?.isArbitrage) {
     const which = [
       arb1x2?.isArbitrage ? `1X2 (+${arb1x2.profitPct.toFixed(1)}%)` : null,
       arbGoals?.isArbitrage ? `Over/Under 2.5 (+${arbGoals.profitPct.toFixed(1)}%)` : null,
+      arbCorners?.isArbitrage ? `Over/Under corner (+${arbCorners.profitPct.toFixed(1)}%)` : null,
     ].filter(Boolean).join(', ');
     blocks.push(`<div style="background:#3ecf6022;border:1px solid #3ecf6088;border-radius:6px;padding:8px 10px;margin-bottom:10px;color:var(--green);font-weight:700;font-size:11px">
       💎 ARBITRAGGIO su ${which} — puntando su ogni esito nel bookmaker con la quota migliore, il profitto è garantito indipendentemente dal risultato. Ricontrolla le quote prima di piazzare: sono inserite a mano, un errore di battitura può renderlo falso.
@@ -948,11 +990,18 @@ function renderEV(wProb, dProb, lProb, xgH, xgA, homeSuspect, awaySuspect, homeL
       Under ${fmtPct(evGoals.ev[1])}${bUnder.bookmaker ? ` (${bUnder.bookmaker})` : ''}
     </div>`);
   }
+  if (evCorners.hasOdds) {
+    blocks.push(`<div style="margin-bottom:8px">
+      <div style="font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:3px">Over/Under ${cornerLine} corner (prezzo migliore — Poisson, non fittato: vedi nota nel codice)</div>
+      EV: Over ${fmtPct(evCorners.ev[0])}${bCOver.bookmaker ? ` (${bCOver.bookmaker})` : ''} &nbsp;·&nbsp;
+      Under ${fmtPct(evCorners.ev[1])}${bCUnder.bookmaker ? ` (${bCUnder.bookmaker})` : ''}
+    </div>`);
+  }
 
-  if (!ev1x2.hasOdds && !evGoals.hasOdds) {
-    blocks.push('Inserisci le quote di almeno un bookmaker (1X2 e/o Over/Under 2.5) per calcolare il valore atteso — senza quote e\' solo analisi, nessun pick.');
+  if (!ev1x2.hasOdds && !evGoals.hasOdds && !evCorners.hasOdds) {
+    blocks.push('Inserisci le quote di almeno un bookmaker (1X2, Over/Under 2.5 gol e/o corner) per calcolare il valore atteso — senza quote e\' solo analisi, nessun pick.');
   } else {
-    const picks = [ev1x2.pick, evGoals.pick].filter(Boolean);
+    const picks = [ev1x2.pick, evGoals.pick, evCorners.pick].filter(Boolean);
     if (picks.length) {
       blocks.push(picks.map(p => {
         const bk = bookmakerByLabel[p.label];
@@ -979,7 +1028,7 @@ function renderResults(xgH, xgA, hd, ad) {
   const { w, d, l } = probs1x2Raw(xgH, xgA);
   const p1 = Math.round(w*100), px = Math.round(d*100), p2 = Math.round(l*100);
 
-  renderEV(w, d, l, xgH, xgA, hd.xgDataSuspect, ad.xgDataSuspect, hd.xgLowSample, ad.xgLowSample);
+  renderEV(w, d, l, xgH, xgA, cornTot, hd.xgDataSuspect, ad.xgDataSuspect, hd.xgLowSample, ad.xgLowSample);
 
   // Verdict
   const verdEl = document.getElementById('verdict');
