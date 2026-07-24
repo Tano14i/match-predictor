@@ -45,7 +45,12 @@ def load_rows(paths: list[str]) -> list[dict]:
     return rows
 
 
-def run_backtest_ad(rows: list[dict], min_edge: float = MIN_EDGE, odds_source: str = "Avg", rho: float = DC_RHO) -> list[dict]:
+def run_backtest_ad(rows: list[dict], min_edge: float = MIN_EDGE, odds_source: str = "Avg", rho: float = DC_RHO, alpha: float = 1.0) -> list[dict]:
+    """alpha: peso del gol REALE nel target di training del fit attacco/difesa
+    (1.0 = solo gol, comportamento originale; 0.0 = solo proxy tiri in porta;
+    valori intermedi = media pesata). Il grading delle bet (vinta/persa) usa
+    SEMPRE il risultato reale — alpha cambia solo cosa il modello impara
+    dalla storia, non come le bet vengono giudicate."""
     hcol, dcol, acol = f"{odds_source}H", f"{odds_source}D", f"{odds_source}A"
     ocol, ucol = f"{odds_source}>2.5", f"{odds_source}<2.5"
 
@@ -94,7 +99,13 @@ def run_backtest_ad(rows: list[dict], min_edge: float = MIN_EDGE, odds_source: s
                     profit = (pick_goals["odds"] - 1) if won else -1
                     bets.append({"market": "goals", "year": season_year, "won": won, "profit": profit, "edge": pick_goals["edge"]})
 
-        history.append((date, home, away, fthg, ftag))
+        if alpha < 1.0:
+            hst, ast = to_int(r.get("HST")), to_int(r.get("AST"))
+            target_h = alpha * fthg + (1 - alpha) * hst * 0.33 if hst is not None else fthg
+            target_a = alpha * ftag + (1 - alpha) * ast * 0.33 if ast is not None else ftag
+        else:
+            target_h, target_a = fthg, ftag
+        history.append((date, home, away, target_h, target_a))
 
     return bets
 
@@ -106,14 +117,15 @@ def main() -> int:
     ap.add_argument("--min-edge", type=float, default=MIN_EDGE)
     ap.add_argument("--odds-source", default="Avg", choices=["Avg", "B365", "Max", "PS"])
     ap.add_argument("--rho", type=float, default=DC_RHO)
+    ap.add_argument("--alpha", type=float, default=1.0, help="Peso del gol reale nel target di training (1.0=solo gol, 0.0=solo proxy tiri in porta)")
     args = ap.parse_args()
 
     rows = load_rows(args.files)
     label = args.label or " + ".join(args.files)
     print(f"Match totali ({label}): {len(rows)}")
-    print(f"Fonte quote: {args.odds_source} | Margine minimo: {args.min_edge*100:.0f}% | rho: {args.rho} | soglia storia minima: {MIN_HISTORY_MATCHES}")
+    print(f"Fonte quote: {args.odds_source} | Margine minimo: {args.min_edge*100:.0f}% | rho: {args.rho} | alpha: {args.alpha} | soglia storia minima: {MIN_HISTORY_MATCHES}")
 
-    bets = run_backtest_ad(rows, args.min_edge, args.odds_source, args.rho)
+    bets = run_backtest_ad(rows, args.min_edge, args.odds_source, args.rho, args.alpha)
     result = summarize(bets)
 
     print(f"\n── RISULTATO COMPLESSIVO ({label}) — modello attacco/difesa ──")
