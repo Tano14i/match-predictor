@@ -448,8 +448,25 @@ function setTeamType(type) {
   document.getElementById('awayInput').placeholder  = isNational ? 'es. Japan, France...' : 'es. Milan, Real Madrid...';
 }
 
+// Prendiamo un pool piu' ampio (15) delle 5 che poi useremo davvero, perche'
+// filtriamo le amichevoli dopo — vedi isFriendly(). Nessun costo API in
+// piu': resta 1 sola chiamata, solo con 'last' piu' alto.
 async function getRecentFixtures(teamId) {
-  return afFetch('fixtures', { team: teamId, last: 5 });
+  return afFetch('fixtures', { team: teamId, last: 15 });
+}
+
+// Best-effort: api-football riporta la competizione in fix.league.name (es.
+// "Friendlies Clubs", "Friendlies"). Non ho potuto verificare i valori esatti
+// contro l'API live (rete sandbox bloccata) — se il nome non contiene una di
+// queste parole chiave la partita passa come "competitiva" anche se non lo
+// e'. Un'amichevole con dati perfetti resta comunque un pessimo indicatore
+// di forma competitiva (formazioni sperimentali, avversari squilibrati,
+// zero posta in palio) — e' la causa di fondo, non solo il sintomo dei dati
+// mancanti, dietro il caso reale Wolfsburg-Lyon di luglio.
+function isFriendly(fix) {
+  const name = (fix.league?.name || '').toLowerCase();
+  const type = (fix.league?.type || '').toLowerCase();
+  return name.includes('friendl') || name.includes('amichevol') || type.includes('friendl');
 }
 
 async function getFixtureStats(fixtureId) {
@@ -497,10 +514,28 @@ async function buildTeamProfile(teamName, resolvedId) {
   const team = resolvedId ? await getTeamById(resolvedId) : await searchTeam(teamName);
   log(`✅ Trovata: ${team.name} (ID ${team.id})`);
 
-  log(`📊 Carico ultimi 5 match…`);
-  const fixtures = await getRecentFixtures(team.id);
+  log(`📊 Carico ultimi match (pool esteso, poi filtro amichevoli)…`);
+  const pool = await getRecentFixtures(team.id);
+  if (!pool.length) throw new Error(`Nessuna partita recente per ${team.name}`);
+  // Piu' recenti prima, senza fidarsi dell'ordine gia' restituito dall'API.
+  const sortedPool = [...pool].sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date));
+  const competitive = sortedPool.filter(f => !isFriendly(f));
+  const friendlies = sortedPool.filter(f => isFriendly(f));
+  let fixtures = competitive.slice(0, 5);
+  let friendlyFallbackCount = 0;
+  if (fixtures.length < 5) {
+    // Non abbastanza partite competitive nel pool (es. inizio stagione, o la
+    // squadra ha giocato solo amichevoli di recente) -> completiamo con le
+    // amichevoli disponibili invece di fallire, ma lo segnaliamo chiaramente
+    // in UI: meglio un campione dichiaratamente misto che uno che sembra
+    // pulito e non lo e'.
+    const filler = friendlies.slice(0, 5 - fixtures.length);
+    friendlyFallbackCount = filler.length;
+    fixtures = [...fixtures, ...filler].sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date));
+  }
   if (!fixtures.length) throw new Error(`Nessuna partita recente per ${team.name}`);
-  log(`✅ ${fixtures.length} partite caricate`);
+  log(`✅ ${fixtures.length} partite selezionate (${competitive.length} competitive nel pool di ${pool.length})` +
+      (friendlyFallbackCount ? `, ${friendlyFallbackCount} amichevoli usate per completare il campione` : ''));
 
   let totalGF=0, totalGA=0, totalCorners=0, totalShots=0, totalShotsOn=0, statsOk=0;
   let homeShotsOn=0, homeStatsN=0, awayShotsOn=0, awayStatsN=0;
@@ -580,6 +615,7 @@ async function buildTeamProfile(teamName, resolvedId) {
     xgDataSuspect: (totalGF / n) >= 1.0 &&
                    (totalGF / n) > ((totalShotsOn / statsN) * 0.33) * 2.5,
     xgLowSample: statsOk < LOW_SAMPLE_THRESHOLD,
+    friendlyCount: friendlyFallbackCount,
     form: { wins, draws, losses, played: n },
     details,
   };
@@ -747,6 +783,9 @@ function renderTeamCard(el, d) {
   const xgWarning = d.xgDataSuspect
     ? `<div style="font-size:9px;color:var(--red);margin-top:4px">🚨 gol reali (${d.avgGF.toFixed(1)}/m) molto più alti dell'xG stimato (${d.avgXG.toFixed(2)}/m) — probabile dato tiri mancante, NON fidarti di questo xG</div>`
     : '';
+  const friendlyWarning = d.friendlyCount > 0
+    ? `<div style="font-size:9px;color:var(--amber);margin-top:4px">⚠️ ${d.friendlyCount} amichevol${d.friendlyCount === 1 ? 'e' : 'i'} nel campione (competitive insufficienti) — forma meno affidabile del solito</div>`
+    : '';
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
@@ -763,6 +802,7 @@ function renderTeamCard(el, d) {
     <div style="margin-top:10px">${history}</div>
     ${coverageNote}
     ${xgWarning}
+    ${friendlyWarning}
   `;
 }
 
