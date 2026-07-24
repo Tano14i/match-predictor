@@ -528,6 +528,10 @@ async function getInjuries(teamId, dateStr) {
   return afFetch('injuries', { team: teamId, date: dateStr });
 }
 
+async function getStandings(leagueId, season) {
+  return afFetch('standings', { league: leagueId, season });
+}
+
 function findTeamStats(stats, teamName) {
   return stats.find(s => s.team.name === teamName) || null;
 }
@@ -548,6 +552,66 @@ const MIN_SPLIT = 2;
 // puro caso. Distinto da xgDataSuspect: quello cattura un rapporto
 // impossibile, questo cattura "troppo pochi dati per saperlo comunque".
 const LOW_SAMPLE_THRESHOLD = 3;
+
+// ─── FATICA/CALENDARIO ────────────────────────────────────────────────────
+// Euristica semplice, NON fittata su dati storici (nessun backtest a
+// disposizione per stimare i valori esatti): sotto 4 giorni di riposo, o 3+
+// partite negli ultimi 14 giorni, un piccolo malus sull'xG atteso. La
+// direzione (poco riposo -> rendimento peggiore) e' un effetto noto in
+// letteratura sportiva, ma i coefficienti -7%/-5% sono ragionevoli, non
+// calibrati su questo tool.
+function fatigueAdjustment(restDays, congestionCount) {
+  let factor = 1.0;
+  if (restDays != null && restDays < 4) factor *= 0.93;
+  if (congestionCount != null && congestionCount >= 3) factor *= 0.95;
+  return factor;
+}
+
+// ─── FORZA AVVERSARI ───────────────────────────────────────────────────────
+// Costa 1 chiamata API in piu' per squadra (endpoint /standings, l'intera
+// classifica in una volta sola, non una chiamata per avversario). Schema di
+// risposta non verificabile da qui contro l'API live (rete sandbox
+// bloccata) — implementato in modo difensivo: qualunque forma imprevista
+// ricade su "nessun dato", nessun crash.
+function primaryLeague(fixtures) {
+  const counts = {};
+  for (const f of fixtures) {
+    const id = f.league?.id;
+    if (id == null) continue;
+    counts[id] = (counts[id] || 0) + 1;
+  }
+  let bestId = null, bestCount = 0;
+  for (const [id, c] of Object.entries(counts)) {
+    if (c > bestCount) { bestCount = c; bestId = Number(id); }
+  }
+  if (bestId == null) return null;
+  const season = fixtures.find(f => f.league?.id === bestId)?.league?.season;
+  return season != null ? { leagueId: bestId, season } : null;
+}
+
+// Indice di forza media degli avversari incontrati (0=deboli, 0.5=media
+// lega, 1=forti), dalla posizione in classifica. Avversari non trovati nella
+// tabella (competizione diversa, es. coppa contro una squadra di un'altra
+// lega) vengono ignorati, non trattati come "deboli" — nessun falso segnale.
+function opponentStrengthIndex(standings, opponentIds) {
+  if (!standings || !standings.length) return null;
+  const scores = opponentIds
+    .map(id => standings.find(s => s.team?.id === id))
+    .filter(Boolean)
+    .map(entry => 1 - (entry.rank - 1) / Math.max(1, standings.length - 1));
+  if (!scores.length) return null;
+  return scores.reduce((a, b) => a + b, 0) / scores.length;
+}
+
+// Aggiustamento contenuto (+-15% max) perche' e' un indice euristico, non
+// fittato: 0.5 (media lega) = nessun aggiustamento; sopra o sotto sposta
+// l'xG in proporzione a quanto gli avversari erano piu' forti/deboli della
+// media — corregge (in parte) il fatto che una vittoria larga contro una
+// squadra debole pesava uguale a una di misura contro una forte.
+function opponentStrengthAdjustment(index) {
+  if (index == null) return 1.0;
+  return 1.0 + (index - 0.5) * 0.3;
+}
 
 async function buildTeamProfile(teamName, resolvedId) {
   const cacheKey = resolvedId ? `id:${resolvedId}` : `name:${teamType}:${teamName.toLowerCase()}`;
@@ -582,6 +646,34 @@ async function buildTeamProfile(teamName, resolvedId) {
   if (!fixtures.length) throw new Error(`Nessuna partita recente per ${team.name}`);
   log(`✅ ${fixtures.length} partite selezionate (${competitive.length} competitive nel pool di ${pool.length})` +
       (friendlyFallbackCount ? `, ${friendlyFallbackCount} amichevoli usate per completare il campione` : ''));
+
+  // Riposo/calendario: sul pool COMPLETO (non solo le 5 filtrate), perche'
+  // anche un'amichevole pesa fisicamente anche se non conta per la forma.
+  // Nessuna chiamata API in piu' — i dati sono gia' scaricati sopra.
+  const now = new Date();
+  const mostRecentDate = sortedPool[0] ? new Date(sortedPool[0].fixture.date) : null;
+  const restDays = mostRecentDate ? Math.round((now - mostRecentDate) / 86400000) : null;
+  const matchCongestion = sortedPool.filter(f => (now - new Date(f.fixture.date)) / 86400000 <= 14).length;
+
+  // Forza avversari: 1 chiamata /standings in piu' (l'intera classifica del
+  // campionato piu' rappresentato tra le 5 partite selezionate, non una
+  // chiamata per avversario). Fallisce in silenzio (log, non throw) se lo
+  // schema di risposta non e' quello atteso o la lega non ha una classifica
+  // disponibile (es. solo coppe/amichevoli) — resta un aggiustamento neutro.
+  let oppStrength = null;
+  const primary = primaryLeague(fixtures);
+  if (primary) {
+    try {
+      log(`📈 Carico classifica (lega ${primary.leagueId}, stagione ${primary.season})…`);
+      const standingsResp = await getStandings(primary.leagueId, primary.season);
+      const standings = standingsResp?.[0]?.league?.standings?.[0] || null;
+      const opponentIds = fixtures.map(f => f.teams.home.id === team.id ? f.teams.away.id : f.teams.home.id);
+      oppStrength = opponentStrengthIndex(standings, opponentIds);
+      log(oppStrength != null ? `✅ Forza avversari: ${(oppStrength*100).toFixed(0)}%` : '⚠️ Classifica non utilizzabile per gli avversari trovati');
+    } catch (e) {
+      log(`⚠️ Classifica non disponibile: ${e.message}`);
+    }
+  }
 
   let totalGF=0, totalGA=0, totalCorners=0, totalShots=0, totalShotsOn=0, statsOk=0;
   let homeShotsOn=0, homeStatsN=0, awayShotsOn=0, awayStatsN=0;
@@ -662,6 +754,7 @@ async function buildTeamProfile(teamName, resolvedId) {
                    (totalGF / n) > ((totalShotsOn / statsN) * 0.33) * 2.5,
     xgLowSample: statsOk < LOW_SAMPLE_THRESHOLD,
     friendlyCount: friendlyFallbackCount,
+    restDays, matchCongestion, oppStrength,
     form: { wins, draws, losses, played: n },
     details,
   };
@@ -889,6 +982,13 @@ function renderTeamCard(el, d) {
   const friendlyWarning = d.friendlyCount > 0
     ? `<div style="font-size:9px;color:var(--amber);margin-top:4px">⚠️ ${d.friendlyCount} amichevol${d.friendlyCount === 1 ? 'e' : 'i'} nel campione (competitive insufficienti) — forma meno affidabile del solito</div>`
     : '';
+  const tired = d.restDays != null && (d.restDays < 4 || d.matchCongestion >= 3);
+  const fatigueNote = d.restDays != null
+    ? `<div style="font-size:9px;color:${tired ? 'var(--amber)' : 'var(--dim)'};margin-top:4px">${tired ? '😮‍💨' : '💤'} riposo: ${d.restDays}g · ${d.matchCongestion} partite negli ultimi 14g${tired ? ' (possibile fatica, xG leggermente ridotto)' : ''}</div>`
+    : '';
+  const oppStrengthNote = d.oppStrength != null
+    ? `<div style="font-size:9px;color:var(--dim);margin-top:4px">📈 forza avversari incontrati: ${(d.oppStrength*100).toFixed(0)}% (50% = media lega)</div>`
+    : '';
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
@@ -906,6 +1006,8 @@ function renderTeamCard(el, d) {
     ${coverageNote}
     ${xgWarning}
     ${friendlyWarning}
+    ${fatigueNote}
+    ${oppStrengthNote}
   `;
 }
 
@@ -1157,9 +1259,14 @@ async function analyze() {
 
     log('🔮 Calcolo previsione…');
     // xG specifico casa/trasferta quando il campione lo permette (vedi
-    // MIN_SPLIT in buildTeamProfile), altrimenti media generale come prima.
-    const xgH = Math.max(0.05, hd.homeXG ?? hd.avgXG);
-    const xgA = Math.max(0.05, ad.awayXG ?? ad.avgXG);
+    // MIN_SPLIT in buildTeamProfile), altrimenti media generale come prima —
+    // poi aggiustato per riposo/calendario e forza avversari incontrati.
+    const xgH = Math.max(0.05, (hd.homeXG ?? hd.avgXG)
+      * fatigueAdjustment(hd.restDays, hd.matchCongestion)
+      * opponentStrengthAdjustment(hd.oppStrength));
+    const xgA = Math.max(0.05, (ad.awayXG ?? ad.avgXG)
+      * fatigueAdjustment(ad.restDays, ad.matchCongestion)
+      * opponentStrengthAdjustment(ad.oppStrength));
     renderResults(xgH, xgA, hd, ad);
     log('✅ Analisi completata.');
 
