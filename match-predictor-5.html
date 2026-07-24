@@ -755,11 +755,153 @@ async function buildTeamProfile(teamName, resolvedId) {
     xgLowSample: statsOk < LOW_SAMPLE_THRESHOLD,
     friendlyCount: friendlyFallbackCount,
     restDays, matchCongestion, oppStrength,
+    primary, // { leagueId, season } o null — usato per il modello attacco/difesa
     form: { wins, draws, losses, played: n },
     details,
   };
   teamProfileCache.set(cacheKey, profile);
   return profile;
+}
+
+// ─── MODELLO ATTACCO/DIFESA (Dixon-Coles via MLE) ───────────────────────────
+// Alternativa al proxy sopra (tiri in porta ultime 5 partite): per ogni
+// squadra della lega stima una forza d'attacco e una di difesa via Poisson
+// regression log-lineare, pesata a decadimento temporale, sull'INTERA
+// stagione (non solo le ultime 5 partite della singola squadra):
+//   log(lambda_casa)     = mu + homeAdv + attack[casa] - defense[trasferta]
+//   log(lambda_trasferta) = mu + attack[trasferta] - defense[casa]
+// Stessa formula, stessi XI/RIDGE, porting diretto di backtest/dixon_coles_model.py
+// dove e' stato validato offline su dati storici reali (football-data.co.uk):
+// batte il proxy in 4 leghe su 6 configurazioni testate (Premier League,
+// Eredivisie, Serie A — vedi backtest/), ma MAI in modo garantito
+// profittevole. E' un modello migliore, non una promessa di vincere.
+// AD_XI e' un valore tipico da letteratura (Dixon-Coles 1997), non
+// calibrato su questo tool (stessa scelta gia' fatta per DC_RHO).
+const AD_XI = 0.0018;       // decadimento temporale giornaliero
+const AD_RIDGE = 0.05;      // penalita' L2 per identificabilita' attack/defense
+const AD_MIN_HISTORY = 60;  // sotto questa soglia, nessuna previsione (troppo pochi dati)
+
+// Cache per la sessione: la stessa lega analizzata in matchup diversi non
+// ripete il fetch + fit (costoso solo la prima volta).
+const leagueModelCache = new Map();
+
+async function getLeagueFixturesSeason(leagueId, season) {
+  const res = await afFetch('fixtures', { league: leagueId, season });
+  // Solo partite con risultato reale: scarta i fixture futuri/annullati
+  // (piu' robusto che fidarsi del vocabolario esatto di status.short).
+  return res.filter(f => f.goals?.home != null && f.goals?.away != null);
+}
+
+// Fit via massima verosimiglianza (gradiente analitico + Adam, l'equivalente
+// in puro JS di scipy.optimize usato nel backtest — nessuna libreria di
+// ottimizzazione disponibile lato browser).
+function fitAttackDefense(history, asOfDate) {
+  if (history.length < AD_MIN_HISTORY) return null;
+
+  const teams = [...new Set(history.flatMap(m => [m.home, m.away]))].sort();
+  const idx = new Map(teams.map((t, i) => [t, i]));
+  const K = teams.length;
+  const N = history.length;
+
+  const w = history.map(m => Math.exp(-AD_XI * (asOfDate - m.date) / 86400000));
+  const hi = history.map(m => idx.get(m.home));
+  const ai = history.map(m => idx.get(m.away));
+  const fthg = history.map(m => m.fthg);
+  const ftag = history.map(m => m.ftag);
+
+  // theta = [mu, homeAdv, attack(K), defense(K)]
+  function lossAndGrad(theta) {
+    const mu = theta[0], homeAdv = theta[1];
+    const attack = theta.subarray(2, 2 + K);
+    const defense = theta.subarray(2 + K, 2 + 2 * K);
+
+    let negLL = 0, gMu = 0, gHA = 0;
+    const gAttack = new Float64Array(K);
+    const gDefense = new Float64Array(K);
+
+    for (let i = 0; i < N; i++) {
+      const h = hi[i], a = ai[i];
+      const logLam = mu + homeAdv + attack[h] - defense[a];
+      const logMu = mu + attack[a] - defense[h];
+      const lam = Math.exp(logLam);
+      const muA = Math.exp(logMu);
+      negLL -= w[i] * (fthg[i] * logLam - lam + ftag[i] * logMu - muA);
+
+      const residHome = w[i] * (fthg[i] - lam);
+      const residAway = w[i] * (ftag[i] - muA);
+      gMu -= (residHome + residAway);
+      gHA -= residHome;
+      gAttack[h] -= residHome;
+      gAttack[a] -= residAway;
+      gDefense[a] += residHome;
+      gDefense[h] += residAway;
+    }
+    for (let k = 0; k < K; k++) {
+      negLL += AD_RIDGE * (attack[k] * attack[k] + defense[k] * defense[k]);
+      gAttack[k] += 2 * AD_RIDGE * attack[k];
+      gDefense[k] += 2 * AD_RIDGE * defense[k];
+    }
+
+    const grad = new Float64Array(2 + 2 * K);
+    grad[0] = gMu; grad[1] = gHA;
+    grad.set(gAttack, 2);
+    grad.set(gDefense, 2 + K);
+    return { loss: negLL, grad };
+  }
+
+  const theta = new Float64Array(2 + 2 * K);
+  theta[0] = 0.3;
+  const m = new Float64Array(theta.length), v = new Float64Array(theta.length);
+  const beta1 = 0.9, beta2 = 0.999, eps = 1e-8, lr = 0.05;
+  let prevLoss = Infinity;
+  for (let iter = 1; iter <= 400; iter++) {
+    const { loss, grad } = lossAndGrad(theta);
+    if (iter > 20 && Math.abs(prevLoss - loss) < 1e-6) break;
+    prevLoss = loss;
+    for (let j = 0; j < theta.length; j++) {
+      m[j] = beta1 * m[j] + (1 - beta1) * grad[j];
+      v[j] = beta2 * v[j] + (1 - beta2) * grad[j] * grad[j];
+      const mHat = m[j] / (1 - Math.pow(beta1, iter));
+      const vHat = v[j] / (1 - Math.pow(beta2, iter));
+      theta[j] -= lr * mHat / (Math.sqrt(vHat) + eps);
+    }
+  }
+
+  const mu = theta[0], homeAdv = theta[1];
+  const attack = {}, defense = {};
+  teams.forEach((t, i) => { attack[t] = theta[2 + i]; defense[t] = theta[2 + K + i]; });
+  return { mu, homeAdv, attack, defense, nMatches: N };
+}
+
+function attackDefenseExpectedGoals(fit, home, away) {
+  if (!fit || !(home in fit.attack) || !(away in fit.attack)) return [null, null];
+  const lam = Math.exp(fit.mu + fit.homeAdv + fit.attack[home] - fit.defense[away]);
+  const muA = Math.exp(fit.mu + fit.attack[away] - fit.defense[home]);
+  return [lam, muA];
+}
+
+async function getLeagueModel(leagueId, season) {
+  const cacheKey = `${leagueId}:${season}`;
+  if (leagueModelCache.has(cacheKey)) return leagueModelCache.get(cacheKey);
+
+  let raw = await getLeagueFixturesSeason(leagueId, season);
+  if (raw.length < AD_MIN_HISTORY) {
+    // Stagione appena iniziata: aggiungiamo quella precedente per avere
+    // abbastanza storia (stesso principio delle stagioni concatenate nel
+    // backtest) — il decadimento temporale gli da' comunque peso basso.
+    try {
+      const prevRaw = await getLeagueFixturesSeason(leagueId, season - 1);
+      raw = [...prevRaw, ...raw];
+    } catch (e) { /* nessuna stagione precedente disponibile: si prosegue con quello che c'e' */ }
+  }
+
+  const history = raw
+    .map(f => ({ date: new Date(f.fixture.date), home: f.teams.home.name, away: f.teams.away.name, fthg: f.goals.home, ftag: f.goals.away }))
+    .sort((a, b) => a.date - b.date);
+
+  const fit = history.length >= AD_MIN_HISTORY ? fitAttackDefense(history, new Date()) : null;
+  leagueModelCache.set(cacheKey, fit);
+  return fit;
 }
 
 // ─── POISSON + DIXON-COLES ───────────────────────────────────────────────────
@@ -1116,7 +1258,7 @@ function renderEV(wProb, dProb, lProb, xgH, xgA, cornTot, homeSuspect, awaySuspe
   document.getElementById('evBody').innerHTML = blocks.join('');
 }
 
-function renderResults(xgH, xgA, hd, ad) {
+function renderResults(xgH, xgA, hd, ad, xgSource = 'proxy') {
   const assenze   = +document.getElementById('inAssenze').value;
   const pressione = +document.getElementById('inPressione').value;
   const motiv     = +document.getElementById('inMotiv').value;
@@ -1143,8 +1285,13 @@ function renderResults(xgH, xgA, hd, ad) {
   // xG cards
   document.getElementById('rxgH').textContent = xgH.toFixed(2);
   document.getElementById('rxgA').textContent = xgA.toFixed(2);
-  document.getElementById('rxgHSub').textContent = hd.homeXG != null ? 'proxy tiri in porta (solo casa)' : 'proxy tiri in porta (media generale)';
-  document.getElementById('rxgASub').textContent = ad.awayXG != null ? 'proxy tiri in porta (solo trasferta)' : 'proxy tiri in porta (media generale)';
+  if (xgSource === 'attack-defense') {
+    document.getElementById('rxgHSub').textContent = 'modello attacco/difesa (fit su tutta la lega)';
+    document.getElementById('rxgASub').textContent = 'modello attacco/difesa (fit su tutta la lega)';
+  } else {
+    document.getElementById('rxgHSub').textContent = hd.homeXG != null ? 'proxy tiri in porta (solo casa)' : 'proxy tiri in porta (media generale)';
+    document.getElementById('rxgASub').textContent = ad.awayXG != null ? 'proxy tiri in porta (solo trasferta)' : 'proxy tiri in porta (media generale)';
+  }
   const totEl = document.getElementById('rxgTot');
   totEl.textContent = xgTot.toFixed(2);
   totEl.style.color = xgTot >= 2.5 ? '#f0a500' : '#8a9080';
@@ -1258,16 +1405,43 @@ async function analyze() {
     await autoFillAssenze(hd.teamId, ad.teamId);
 
     log('🔮 Calcolo previsione…');
-    // xG specifico casa/trasferta quando il campione lo permette (vedi
-    // MIN_SPLIT in buildTeamProfile), altrimenti media generale come prima —
-    // poi aggiustato per riposo/calendario e forza avversari incontrati.
-    const xgH = Math.max(0.05, (hd.homeXG ?? hd.avgXG)
-      * fatigueAdjustment(hd.restDays, hd.matchCongestion)
-      * opponentStrengthAdjustment(hd.oppStrength));
-    const xgA = Math.max(0.05, (ad.awayXG ?? ad.avgXG)
-      * fatigueAdjustment(ad.restDays, ad.matchCongestion)
-      * opponentStrengthAdjustment(ad.oppStrength));
-    renderResults(xgH, xgA, hd, ad);
+    // Prova prima il modello attacco/difesa (fit sull'intera lega, vedi
+    // getLeagueModel): richiede che le due squadre giochino nella stessa
+    // competizione principale e che quella lega abbia abbastanza storia
+    // (AD_MIN_HISTORY). Se non disponibile per qualsiasi motivo (leghe
+    // diverse, fetch fallito, storia insufficiente), fallback silenzioso sul
+    // proxy tiri-in-porta — nessun crash, comportamento invariato di prima.
+    let adFit = null;
+    if (hd.primary && ad.primary && hd.primary.leagueId === ad.primary.leagueId) {
+      try {
+        log(`🧮 Provo il modello attacco/difesa (lega ${hd.primary.leagueId})…`);
+        adFit = await getLeagueModel(hd.primary.leagueId, hd.primary.season);
+      } catch (e) {
+        log(`⚠️ Modello attacco/difesa non disponibile: ${e.message}`);
+      }
+    }
+    const [adXgH, adXgA] = adFit ? attackDefenseExpectedGoals(adFit, hd.teamName, ad.teamName) : [null, null];
+
+    let xgH, xgA, xgSource;
+    if (adXgH != null && adXgA != null) {
+      xgSource = 'attack-defense';
+      xgH = Math.max(0.05, adXgH * fatigueAdjustment(hd.restDays, hd.matchCongestion) * opponentStrengthAdjustment(hd.oppStrength));
+      xgA = Math.max(0.05, adXgA * fatigueAdjustment(ad.restDays, ad.matchCongestion) * opponentStrengthAdjustment(ad.oppStrength));
+      log(`✅ xG dal modello attacco/difesa (${adFit.nMatches} partite storiche di lega)`);
+    } else {
+      xgSource = 'proxy';
+      // xG specifico casa/trasferta quando il campione lo permette (vedi
+      // MIN_SPLIT in buildTeamProfile), altrimenti media generale come
+      // prima — poi aggiustato per riposo/calendario e forza avversari.
+      xgH = Math.max(0.05, (hd.homeXG ?? hd.avgXG)
+        * fatigueAdjustment(hd.restDays, hd.matchCongestion)
+        * opponentStrengthAdjustment(hd.oppStrength));
+      xgA = Math.max(0.05, (ad.awayXG ?? ad.avgXG)
+        * fatigueAdjustment(ad.restDays, ad.matchCongestion)
+        * opponentStrengthAdjustment(ad.oppStrength));
+      log('ℹ️ xG dal proxy tiri-in-porta (modello attacco/difesa non disponibile per questo confronto)');
+    }
+    renderResults(xgH, xgA, hd, ad, xgSource);
     log('✅ Analisi completata.');
 
   } catch(err) {
