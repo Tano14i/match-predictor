@@ -465,8 +465,11 @@ async function getInjuries(teamId, dateStr) {
   return afFetch('injuries', { team: teamId, date: dateStr });
 }
 
+function findTeamStats(stats, teamName) {
+  return stats.find(s => s.team.name === teamName) || null;
+}
 function statVal(stats, teamName, statName) {
-  const t = stats.find(s => s.team.name === teamName);
+  const t = findTeamStats(stats, teamName);
   if (!t) return null;
   const s = t.statistics.find(s => s.type === statName);
   return s?.value ?? null;
@@ -509,13 +512,25 @@ async function buildTeamProfile(teamName, resolvedId) {
     try {
       log(`  ⚡ Stats: ${fix.teams.home.name} vs ${fix.teams.away.name}`);
       const stats = await getFixtureStats(fix.fixture.id);
-      const corners  = statVal(stats, team.name, 'Corner Kicks') ?? 0;
-      const shots    = statVal(stats, team.name, 'Total Shots') ?? 0;
-      const shotsOn  = statVal(stats, team.name, 'Shots on Goal') ?? 0;
-      totalCorners += corners; totalShots += shots; totalShotsOn += shotsOn;
-      statsOk++;
-      if (isHome) { homeShotsOn += shotsOn; homeStatsN++; } else { awayShotsOn += shotsOn; awayStatsN++; }
-      details.push({ opp, gf, ga, corners, shotsOn, date: fix.fixture.date?.slice(0,10) });
+      const teamStats = findTeamStats(stats, team.name);
+      if (!teamStats) {
+        // La risposta e' arrivata (nessun errore HTTP) ma non contiene le
+        // statistiche di QUESTA squadra: comune su amichevoli/partite minori
+        // (visto dal vivo: xG proxy crollato a ~1/10 del reale su un'amichevole
+        // pre-campionato perche' shotsOn restava a 0 senza nessun avviso).
+        // Prima questo caso NON veniva distinto da un fetch riuscito -> non
+        // va contato nel denominatore, va trattato come dato mancante.
+        log(`  ⚠️ Stats assenti per ${team.name} in questo fixture`);
+        details.push({ opp, gf, ga, corners: null, shotsOn: null, date: fix.fixture.date?.slice(0,10) });
+      } else {
+        const corners  = statVal(stats, team.name, 'Corner Kicks') ?? 0;
+        const shots    = statVal(stats, team.name, 'Total Shots') ?? 0;
+        const shotsOn  = statVal(stats, team.name, 'Shots on Goal') ?? 0;
+        totalCorners += corners; totalShots += shots; totalShotsOn += shotsOn;
+        statsOk++;
+        if (isHome) { homeShotsOn += shotsOn; homeStatsN++; } else { awayShotsOn += shotsOn; awayStatsN++; }
+        details.push({ opp, gf, ga, corners, shotsOn, date: fix.fixture.date?.slice(0,10) });
+      }
     } catch(e) {
       details.push({ opp, gf, ga, corners: null, shotsOn: null, date: fix.fixture.date?.slice(0,10) });
     }
@@ -546,6 +561,18 @@ async function buildTeamProfile(teamName, resolvedId) {
     // vantaggio-casa anche quando il dato per separarlo era gia' disponibile.
     homeXG, awayXG,
     statsCoverage: `${statsOk}/${n}`,
+    // Sanity check: se i gol REALI segnati superano di molto quello che
+    // l'xG proxy (tiri in porta * 0.33) implicherebbe, quasi certamente il
+    // dato tiri e' mancante per una o piu' partite anche quando la fetch
+    // "riesce" (visto dal vivo su un'amichevole: xG 0.26 con 2.6 gol/partita
+    // reali — un disallineamento del genere non e' realismo calcistico, e'
+    // un dato mancante che sta zittendo l'xG). Soglia 2.5x, solo se il team
+    // segna almeno 1 gol/partita in media (evita falsi allarmi sul rumore
+    // quando i numeri sono comunque piccoli). NB: include volutamente anche
+    // il caso xG=0 esatto (dato tiri assente su tutte le partite) — e' la
+    // versione piu' estrema dello stesso problema, non un caso da escludere.
+    xgDataSuspect: (totalGF / n) >= 1.0 &&
+                   (totalGF / n) > ((totalShotsOn / statsN) * 0.33) * 2.5,
     form: { wins, draws, losses, played: n },
     details,
   };
@@ -710,6 +737,9 @@ function renderTeamCard(el, d) {
   const coverageNote = d.statsCoverage !== `${d.form.played}/${d.form.played}`
     ? `<div style="font-size:9px;color:var(--dim);margin-top:6px">⚠️ stats disponibili solo per ${d.statsCoverage} match — medie calcolate solo su quelli</div>`
     : '';
+  const xgWarning = d.xgDataSuspect
+    ? `<div style="font-size:9px;color:var(--red);margin-top:4px">🚨 gol reali (${d.avgGF.toFixed(1)}/m) molto più alti dell'xG stimato (${d.avgXG.toFixed(2)}/m) — probabile dato tiri mancante, NON fidarti di questo xG</div>`
+    : '';
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
@@ -718,13 +748,14 @@ function renderTeamCard(el, d) {
     </div>
     <div class="team-meta">ultimi ${d.form.played} match</div>
     <div class="grid3" style="margin-bottom:8px">
-      <div><div class="mini-stat-label">xG/m*</div><div class="mini-stat-value" style="color:var(--amber)">${d.avgXG.toFixed(2)}</div></div>
+      <div><div class="mini-stat-label">xG/m*</div><div class="mini-stat-value" style="color:${d.xgDataSuspect ? 'var(--red)' : 'var(--amber)'}">${d.avgXG.toFixed(2)}</div></div>
       <div><div class="mini-stat-label">Gol/m</div><div class="mini-stat-value" style="color:var(--green)">${d.avgGF.toFixed(1)}</div></div>
       <div><div class="mini-stat-label">Corn/m</div><div class="mini-stat-value" style="color:var(--blue)">${d.avgCorners.toFixed(1)}</div></div>
     </div>
     <div>${badges}</div>
     <div style="margin-top:10px">${history}</div>
     ${coverageNote}
+    ${xgWarning}
   `;
 }
 
@@ -732,7 +763,7 @@ function fmtPct(x) {
   return x == null ? '—' : `${x >= 0 ? '+' : ''}${(x*100).toFixed(1)}%`;
 }
 
-function renderEV(wProb, dProb, lProb, xgH, xgA) {
+function renderEV(wProb, dProb, lProb, xgH, xgA, homeSuspect, awaySuspect) {
   const odds1 = +document.getElementById('odds1').value || null;
   const oddsX = +document.getElementById('oddsX').value || null;
   const odds2 = +document.getElementById('odds2').value || null;
@@ -744,6 +775,17 @@ function renderEV(wProb, dProb, lProb, xgH, xgA) {
   const evGoals = evaluateValue([over, under], [oddsOver, oddsUnder], ['Over 2.5', 'Under 2.5']);
 
   const blocks = [];
+  // Avviso in cima, prima di qualunque EV/pick: un pick calcolato su xG
+  // costruito da dati tiri mancanti (vedi buildTeamProfile/xgDataSuspect)
+  // NON e' valore reale, e' rumore che sembra un edge enorme. Visto dal
+  // vivo su un'amichevole pre-campionato: edge di +129%/+275% completamente
+  // falsi per questo motivo.
+  if (homeSuspect || awaySuspect) {
+    const who = homeSuspect && awaySuspect ? 'entrambe le squadre' : homeSuspect ? 'la squadra di casa' : 'la squadra ospite';
+    blocks.push(`<div style="background:#e8444422;border:1px solid #e8444466;border-radius:6px;padding:8px 10px;margin-bottom:10px;color:#ff8a8a;font-weight:600;font-size:11px">
+      🚨 xG sospetto per ${who} (gol reali molto più alti dell'xG stimato) — i pick sotto sono probabilmente artefatti di dati mancanti, non valore reale. Non scommetterci sopra.
+    </div>`);
+  }
   if (ev1x2.hasOdds) {
     blocks.push(`<div style="margin-bottom:8px">
       <div style="font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:3px">1X2</div>
@@ -786,7 +828,7 @@ function renderResults(xgH, xgA, hd, ad) {
   const { w, d, l } = probs1x2Raw(xgH, xgA);
   const p1 = Math.round(w*100), px = Math.round(d*100), p2 = Math.round(l*100);
 
-  renderEV(w, d, l, xgH, xgA);
+  renderEV(w, d, l, xgH, xgA, hd.xgDataSuspect, ad.xgDataSuspect);
 
   // Verdict
   const verdEl = document.getElementById('verdict');
