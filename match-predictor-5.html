@@ -187,6 +187,7 @@
     <div style="display:flex;align-items:center;margin-bottom:5px">
       <span class="status-dot" id="statusDot"></span>
       <span class="status-label" id="statusLabel">INSERIRE API KEY PER INIZIARE</span>
+      <span id="apiCallCounter" style="margin-left:auto;font-size:10px;color:var(--dim);font-family:'JetBrains Mono',monospace"></span>
     </div>
     <h1>Match Prediction Engine</h1>
     <p class="subtitle">Dati live · Forma reale · Corner · Poisson · Partite di oggi</p>
@@ -243,6 +244,7 @@
           <div>
             <span class="lbl">Assenze (+ casa / − osp)</span>
             <input type="number" id="inAssenze" value="0" />
+            <div id="assenzeHint" style="font-size:9px;color:var(--dim);margin-top:3px"></div>
           </div>
           <div>
             <span class="lbl">Pressione 0–10</span>
@@ -259,6 +261,18 @@
               <option value="DOWN">DOWN ↓</option>
               <option value="UP">UP ↑</option>
             </select>
+          </div>
+        </div>
+        <div class="divider">
+          <span class="lbl">💰 Quote (opzionale — senza queste, solo analisi, nessun pick di valore)</span>
+          <div class="grid3" style="margin-top:6px;margin-bottom:8px">
+            <div><span class="lbl">Quota 1 (Casa)</span><input type="number" step="0.01" id="odds1" placeholder="es. 1.85" /></div>
+            <div><span class="lbl">Quota X</span><input type="number" step="0.01" id="oddsX" placeholder="es. 3.40" /></div>
+            <div><span class="lbl">Quota 2 (Ospite)</span><input type="number" step="0.01" id="odds2" placeholder="es. 4.20" /></div>
+          </div>
+          <div class="grid2">
+            <div><span class="lbl">Quota Over 2.5</span><input type="number" step="0.01" id="oddsOver" placeholder="es. 1.90" /></div>
+            <div><span class="lbl">Quota Under 2.5</span><input type="number" step="0.01" id="oddsUnder" placeholder="es. 1.90" /></div>
           </div>
         </div>
       </div>
@@ -283,13 +297,21 @@
 
     <!-- RESULTS -->
     <div id="results" class="hidden">
+      <!-- VALORE ATTESO (EV): probabilita' del modello vs quote reali — questo
+           e' il segnale primario per decidere se scommettere, non il verdetto
+           narrativo qui sotto (quello resta un'euristica non validata). -->
+      <div class="card" id="evCard" style="margin-bottom:14px">
+        <div class="card-label" style="margin-bottom:10px">💰 Valore atteso (EV) — modello vs quote</div>
+        <div id="evBody" style="font-size:12px;color:var(--mid)"></div>
+      </div>
       <div class="verdict" id="verdict">
-        <div class="verdict-label" id="verdictLabel"></div>
+        <div class="verdict-label" id="verdictLabel" style="font-size:16px"></div>
         <div class="verdict-sub" id="verdictSub"></div>
+        <div style="font-size:9px;color:var(--dim);margin-top:8px">📋 Nota narrativa da euristica NON validata storicamente — non e' il pick di valore (vedi sopra), solo un commento sul contesto.</div>
       </div>
       <div class="grid3" style="margin-bottom:14px">
-        <div class="card"><div class="card-label">xG Casa</div><div class="card-value" id="rxgH" style="color:var(--blue)"></div><div class="card-sub">proxy tiri in porta</div></div>
-        <div class="card"><div class="card-label">xG Ospite</div><div class="card-value" id="rxgA" style="color:var(--green)"></div><div class="card-sub">proxy tiri in porta</div></div>
+        <div class="card"><div class="card-label">xG Casa</div><div class="card-value" id="rxgH" style="color:var(--blue)"></div><div class="card-sub" id="rxgHSub">proxy tiri in porta</div></div>
+        <div class="card"><div class="card-label">xG Ospite</div><div class="card-value" id="rxgA" style="color:var(--green)"></div><div class="card-sub" id="rxgASub">proxy tiri in porta</div></div>
         <div class="card"><div class="card-label">xG Totale</div><div class="card-value" id="rxgTot"></div><div class="card-sub" id="rxgTotSub"></div></div>
       </div>
       <div class="grid2" style="margin-bottom:14px">
@@ -328,6 +350,31 @@ let currentTab = 'search';
 let todayLoaded = false;
 let teamType = 'club'; // 'club' or 'national'
 
+// Squadra gia' risolta (id certo) quando si arriva da "Partite di oggi":
+// evita di ri-cercare per nome e reintrodurre ambiguita' gia' risolta.
+// Invalidata non appena l'utente modifica manualmente l'input.
+let resolvedTeam = { home: null, away: null };
+
+// Cache dei profili squadra per la sessione: una stessa squadra analizzata
+// in due matchup diversi non ripete le 7 chiamate API.
+const teamProfileCache = new Map();
+
+// ─── QUOTA API (piano free = 100 chiamate/giorno; persistita per giornata) ──
+function todayKey() { return `af_calls_${new Date().toISOString().slice(0,10)}`; }
+function getCallCount() { return parseInt(localStorage.getItem(todayKey()) || '0', 10); }
+function bumpCallCount() {
+  const n = getCallCount() + 1;
+  localStorage.setItem(todayKey(), String(n));
+  updateCallCounterUI(n);
+  return n;
+}
+function updateCallCounterUI(n) {
+  const el = document.getElementById('apiCallCounter');
+  if (!el) return;
+  el.textContent = `${n} / 100 chiamate oggi`;
+  el.style.color = n >= 90 ? 'var(--red)' : n >= 60 ? 'var(--amber)' : 'var(--dim)';
+}
+
 // ─── API-FOOTBALL ───────────────────────────────────────────────────────────
 const AF = 'https://v3.football.api-sports.io';
 
@@ -335,11 +382,9 @@ async function afFetch(path, params) {
   const url = new URL(`${AF}/${path}`);
   Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, String(v)));
   const r = await fetch(url.toString(), {
-    headers: {
-      
-      'x-apisports-key': API_KEY,
-    }
+    headers: { 'x-apisports-key': API_KEY },
   });
+  bumpCallCount();
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const data = await r.json();
   if (data.errors && Object.keys(data.errors).length > 0)
@@ -347,32 +392,47 @@ async function afFetch(path, params) {
   return data.response;
 }
 
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
 function sanitizeName(name) {
-  // Remove accents and special characters for API compatibility
-  return name.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9 ]/g, '').trim();
+  // Remove accents and special characters for API compatibility.
+  // ̀-ͯ = blocco Unicode dei segni diacritici combinanti, esplicito
+  // invece dei caratteri letterali (fragile: dipende dall'encoding del file).
+  return name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9 ]/g, '').trim();
 }
 
 async function searchTeam(name) {
   const searchName = sanitizeName(name);
   const res = await afFetch('teams', { search: searchName });
   if (!res.length) throw new Error(`Squadra "${name}" non trovata`);
-  console.log('Search results for', name, res.map(r => ({name: r.team.name, national: r.team.national, id: r.team.id})));
+  const norm = n => n.toLowerCase().replace(/[^a-z0-9]/g,'');
+  const target = norm(name);
+
   if (teamType === 'national') {
-    // Filter by national=true, then prefer exact name match
     const nationals = res.filter(r => r.team.national === true);
     if (nationals.length) {
-      const norm = n => n.toLowerCase().replace(/[^a-z0-9]/g,'');
-      const exact = nationals.find(r => norm(r.team.name) === norm(name));
+      const exact = nationals.find(r => norm(r.team.name) === target);
       return exact ? exact.team : nationals[0].team;
     }
-    // fallback: just return first result
     return res[0].team;
   }
-  // Club: skip national teams, prefer non-national
-  if (teamType === 'club') {
-    const clubs = res.filter(r => r.team.national === false);
-    if (clubs.length) return clubs[0].team;
-  }
+  // Club: scarta le nazionali, poi preferisci il nome esatto — senza questo
+  // "Milan" poteva risolvere al primo risultato API qualunque fosse, non
+  // necessariamente AC Milan (le nazionali avevano gia' questa preferenza,
+  // i club no: era un'incoerenza).
+  const clubs = res.filter(r => r.team.national === false);
+  const pool = clubs.length ? clubs : res;
+  const exact = pool.find(r => norm(r.team.name) === target);
+  return exact ? exact.team : pool[0].team;
+}
+
+async function getTeamById(id) {
+  const res = await afFetch('teams', { id });
+  if (!res.length) throw new Error(`Squadra ID ${id} non trovata`);
   return res[0].team;
 }
 
@@ -401,6 +461,10 @@ async function getTodayFixtures() {
   return afFetch('fixtures', { date: today });
 }
 
+async function getInjuries(teamId, dateStr) {
+  return afFetch('injuries', { team: teamId, date: dateStr });
+}
+
 function statVal(stats, teamName, statName) {
   const t = stats.find(s => s.team.name === teamName);
   if (!t) return null;
@@ -409,9 +473,19 @@ function statVal(stats, teamName, statName) {
 }
 
 // ─── TEAM PROFILE ──────────────────────────────────────────────────────────
-async function buildTeamProfile(teamName) {
+// Sotto questa soglia di match in un contesto (casa/trasferta), lo split e'
+// troppo rumoroso: si resta sulla media generale.
+const MIN_SPLIT = 2;
+
+async function buildTeamProfile(teamName, resolvedId) {
+  const cacheKey = resolvedId ? `id:${resolvedId}` : `name:${teamType}:${teamName.toLowerCase()}`;
+  if (teamProfileCache.has(cacheKey)) {
+    log(`💾 ${teamName}: profilo dalla cache (nessuna chiamata API)`);
+    return teamProfileCache.get(cacheKey);
+  }
+
   log(`🔍 Cerco "${teamName}"…`);
-  const team = await searchTeam(teamName);
+  const team = resolvedId ? await getTeamById(resolvedId) : await searchTeam(teamName);
   log(`✅ Trovata: ${team.name} (ID ${team.id})`);
 
   log(`📊 Carico ultimi 5 match…`);
@@ -419,7 +493,8 @@ async function buildTeamProfile(teamName) {
   if (!fixtures.length) throw new Error(`Nessuna partita recente per ${team.name}`);
   log(`✅ ${fixtures.length} partite caricate`);
 
-  let totalGF=0, totalGA=0, totalCorners=0, totalShots=0, totalShotsOn=0;
+  let totalGF=0, totalGA=0, totalCorners=0, totalShots=0, totalShotsOn=0, statsOk=0;
+  let homeShotsOn=0, homeStatsN=0, awayShotsOn=0, awayStatsN=0;
   let wins=0, draws=0, losses=0;
   const details = [];
 
@@ -438,6 +513,8 @@ async function buildTeamProfile(teamName) {
       const shots    = statVal(stats, team.name, 'Total Shots') ?? 0;
       const shotsOn  = statVal(stats, team.name, 'Shots on Goal') ?? 0;
       totalCorners += corners; totalShots += shots; totalShotsOn += shotsOn;
+      statsOk++;
+      if (isHome) { homeShotsOn += shotsOn; homeStatsN++; } else { awayShotsOn += shotsOn; awayStatsN++; }
       details.push({ opp, gf, ga, corners, shotsOn, date: fix.fixture.date?.slice(0,10) });
     } catch(e) {
       details.push({ opp, gf, ga, corners: null, shotsOn: null, date: fix.fixture.date?.slice(0,10) });
@@ -445,41 +522,139 @@ async function buildTeamProfile(teamName) {
   }
 
   const n = fixtures.length;
-  return {
+  // Denominatore delle medie da statistiche = partite con stats DAVVERO
+  // caricate (statsOk), non il totale delle partite (n): se anche una sola
+  // fetch fallisce, dividere per n abbassa la media senza nessun segnale
+  // visibile. avgGF/avgGA restano su n perche' i gol vengono dall'oggetto
+  // fixture stesso, non dalla chiamata stats che puo' fallire.
+  const statsN = statsOk || 1;
+  const homeXG = homeStatsN >= MIN_SPLIT ? (homeShotsOn / homeStatsN) * 0.33 : null;
+  const awayXG = awayStatsN >= MIN_SPLIT ? (awayShotsOn / awayStatsN) * 0.33 : null;
+
+  const profile = {
+    teamId: team.id,
     teamName: team.name,
     teamLogo: team.logo,
     avgGF:      totalGF / n,
     avgGA:      totalGA / n,
-    avgCorners: totalCorners / n,
-    avgShotsOn: totalShotsOn / n,
-    avgXG:      (totalShotsOn / n) * 0.33,
+    avgCorners: totalCorners / statsN,
+    avgShotsOn: totalShotsOn / statsN,
+    avgXG:      (totalShotsOn / statsN) * 0.33,
+    // xG specifico casa/trasferta: null se il campione (< MIN_SPLIT match in
+    // quel contesto) e' troppo piccolo per fidarsi — allora si ricade su
+    // avgXG. Prima il modello usava sempre la media generale, ignorando il
+    // vantaggio-casa anche quando il dato per separarlo era gia' disponibile.
+    homeXG, awayXG,
+    statsCoverage: `${statsOk}/${n}`,
     form: { wins, draws, losses, played: n },
     details,
   };
+  teamProfileCache.set(cacheKey, profile);
+  return profile;
 }
 
-// ─── POISSON ───────────────────────────────────────────────────────────────
+// ─── POISSON + DIXON-COLES ───────────────────────────────────────────────────
 function poissonP(lam, k) {
   let r = Math.exp(-lam);
   for (let i = 0; i < k; i++) r *= lam / (i + 1);
   return r;
 }
+
+// Correzione Dixon-Coles (1997) sui 4 punteggi bassi: il Poisson
+// indipendente puro sottostima leggermente 0-0/1-1 e sovrastima 1-0/0-1,
+// perche' i gol casa/trasferta sono debolmente correlati nei match a basso
+// punteggio. rho = -0.1 e' un valore tipico da letteratura calcistica, NON
+// fittato su questo tool (servirebbe uno storico di risultati che qui non
+// c'e' — vedi il disclaimer sul verdetto: e' una correzione nota, non una
+// garanzia di accuratezza).
+const DC_RHO = -0.1;
+function dixonColesTau(x, y, lambda, mu, rho) {
+  if (x === 0 && y === 0) return 1 - lambda * mu * rho;
+  if (x === 0 && y === 1) return 1 + lambda * rho;
+  if (x === 1 && y === 0) return 1 + mu * rho;
+  if (x === 1 && y === 1) return 1 - rho;
+  return 1;
+}
+function scoreProb(xgH, xgA, h, a) {
+  return poissonP(xgH, h) * poissonP(xgA, a) * dixonColesTau(h, a, xgH, xgA, DC_RHO);
+}
+
 function topScores(xgH, xgA, n=5) {
   const s = [];
   for (let h = 0; h <= 7; h++)
     for (let a = 0; a <= 7; a++)
-      s.push({ h, a, p: poissonP(xgH,h) * poissonP(xgA,a) });
+      s.push({ h, a, p: scoreProb(xgH, xgA, h, a) });
   return s.sort((a,b) => b.p - a.p).slice(0, n);
 }
-function probs1x2(xgH, xgA) {
+// Frazioni non arrotondate (0..1): servono per l'EV, dove arrotondare a
+// interi percentuali prima di moltiplicare per la quota introdurrebbe un
+// errore sistematico. probs1x2() sotto le arrotonda solo per la UI.
+function probs1x2Raw(xgH, xgA) {
   let w=0, d=0, l=0;
   for (let h = 0; h <= 10; h++)
     for (let a = 0; a <= 10; a++) {
-      const p = poissonP(xgH,h) * poissonP(xgA,a);
+      const p = scoreProb(xgH, xgA, h, a);
       if (h>a) w+=p; else if (h===a) d+=p; else l+=p;
     }
   const t = w+d+l;
-  return { p1: Math.round(w/t*100), px: Math.round(d/t*100), p2: Math.round(l/t*100) };
+  return { w: w/t, d: d/t, l: l/t };
+}
+function probs1x2(xgH, xgA) {
+  const { w, d, l } = probs1x2Raw(xgH, xgA);
+  return { p1: Math.round(w*100), px: Math.round(d*100), p2: Math.round(l*100) };
+}
+
+// P(Under/Over line) sui gol totali, dalla stessa griglia Poisson+Dixon-Coles.
+// line e' quasi sempre X.5 (2.5, ecc.): floor(line) e' quindi il taglio esatto
+// tra under e over, nessuna ambiguita' sul pareggio esatto alla linea.
+function probOverUnderGoals(xgH, xgA, line) {
+  const maxUnder = Math.floor(line);
+  let pUnder = 0, pOver = 0;
+  for (let h = 0; h <= 10; h++)
+    for (let a = 0; a <= 10; a++) {
+      const p = scoreProb(xgH, xgA, h, a);
+      if (h + a <= maxUnder) pUnder += p; else pOver += p;
+    }
+  const t = pUnder + pOver;
+  return { under: pUnder / t, over: pOver / t };
+}
+
+// ─── VALORE ATTESO (EV) — probabilita' del modello vs quote reali ───────────
+// Stesso principio usato in tennisanalytics/betting.py: il verdetto qui
+// sotto (getVerdetto) NON guarda mai le quote — puo' consigliare un pick
+// anche se il mercato l'ha gia' prezzato correttamente (nessun valore reale).
+// Qui invece: probabilita' implicita dalle quote (margine bookmaker rimosso,
+// normalizzando a somma 1) confrontata con la probabilita' del modello;
+// EV = prob*quota - 1; si segnala un pick di valore solo se l'EV supera
+// MIN_EDGE. Nessuna quota inserita = nessun pick, solo analisi.
+const MIN_EDGE = 0.05;
+
+function impliedProbs(oddsArr) {
+  const raw = oddsArr.map(o => (o && o > 1) ? 1/o : 0);
+  const total = raw.reduce((a,b) => a+b, 0);
+  if (total <= 0) return oddsArr.map(() => null);
+  return raw.map(r => r / total);
+}
+function expectedValue(prob, odds) {
+  if (!odds || odds <= 1) return null;
+  return prob * odds - 1;
+}
+// probs/oddsArr/labels: array paralleli per N esiti mutuamente esclusivi di
+// UN mercato (es. [home,draw,away] oppure [over,under]). Se nessuna quota e'
+// valida, has_odds=false e pick resta null (nessun falso segnale di valore).
+function evaluateValue(probs, oddsArr, labels) {
+  const hasOdds = oddsArr.some(o => o && o > 1);
+  if (!hasOdds) return { hasOdds: false, implied: null, ev: null, pick: null };
+  const implied = impliedProbs(oddsArr);
+  const ev = probs.map((p, i) => expectedValue(p, oddsArr[i]));
+  let best = null;
+  ev.forEach((e, i) => {
+    if (e != null && (best === null || e > best.edge)) best = { index: i, edge: e };
+  });
+  const pick = (best && best.edge >= MIN_EDGE)
+    ? { label: labels[best.index], edge: best.edge, odds: oddsArr[best.index] }
+    : null;
+  return { hasOdds: true, implied, ev, pick };
 }
 
 // ─── VERDETTO (logica xlsx) ─────────────────────────────────────────────────
@@ -526,16 +701,20 @@ function renderTeamCard(el, d) {
     const cls = m.gf > m.ga ? 'score-w' : m.gf === m.ga ? 'score-d' : 'score-l';
     const cornerStr = m.corners !== null ? `<span style="color:var(--blue)">🚩${m.corners}</span>` : '';
     return `<div class="history-row">
-      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px">vs ${m.opp}</span>
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px">vs ${escapeHtml(m.opp)}</span>
       <span class="history-score ${cls}">${m.gf}–${m.ga}</span>
       ${cornerStr}
     </div>`;
   }).join('');
 
+  const coverageNote = d.statsCoverage !== `${d.form.played}/${d.form.played}`
+    ? `<div style="font-size:9px;color:var(--dim);margin-top:6px">⚠️ stats disponibili solo per ${d.statsCoverage} match — medie calcolate solo su quelli</div>`
+    : '';
+
   el.innerHTML = `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
-      ${d.teamLogo ? `<img src="${d.teamLogo}" style="width:20px;height:20px;object-fit:contain">` : ''}
-      <span class="team-name">${d.teamName}</span>
+      ${d.teamLogo ? `<img src="${escapeHtml(d.teamLogo)}" style="width:20px;height:20px;object-fit:contain">` : ''}
+      <span class="team-name">${escapeHtml(d.teamName)}</span>
     </div>
     <div class="team-meta">ultimi ${d.form.played} match</div>
     <div class="grid3" style="margin-bottom:8px">
@@ -545,7 +724,52 @@ function renderTeamCard(el, d) {
     </div>
     <div>${badges}</div>
     <div style="margin-top:10px">${history}</div>
+    ${coverageNote}
   `;
+}
+
+function fmtPct(x) {
+  return x == null ? '—' : `${x >= 0 ? '+' : ''}${(x*100).toFixed(1)}%`;
+}
+
+function renderEV(wProb, dProb, lProb, xgH, xgA) {
+  const odds1 = +document.getElementById('odds1').value || null;
+  const oddsX = +document.getElementById('oddsX').value || null;
+  const odds2 = +document.getElementById('odds2').value || null;
+  const oddsOver = +document.getElementById('oddsOver').value || null;
+  const oddsUnder = +document.getElementById('oddsUnder').value || null;
+
+  const ev1x2 = evaluateValue([wProb, dProb, lProb], [odds1, oddsX, odds2], ['1 (Casa)', 'X (Pareggio)', '2 (Ospite)']);
+  const { over, under } = probOverUnderGoals(xgH, xgA, 2.5);
+  const evGoals = evaluateValue([over, under], [oddsOver, oddsUnder], ['Over 2.5', 'Under 2.5']);
+
+  const blocks = [];
+  if (ev1x2.hasOdds) {
+    blocks.push(`<div style="margin-bottom:8px">
+      <div style="font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:3px">1X2</div>
+      EV: 1 ${fmtPct(ev1x2.ev[0])} &nbsp;·&nbsp; X ${fmtPct(ev1x2.ev[1])} &nbsp;·&nbsp; 2 ${fmtPct(ev1x2.ev[2])}
+    </div>`);
+  }
+  if (evGoals.hasOdds) {
+    blocks.push(`<div style="margin-bottom:8px">
+      <div style="font-size:10px;color:var(--dim);text-transform:uppercase;margin-bottom:3px">Over/Under 2.5 gol</div>
+      EV: Over ${fmtPct(evGoals.ev[0])} &nbsp;·&nbsp; Under ${fmtPct(evGoals.ev[1])}
+    </div>`);
+  }
+
+  if (!ev1x2.hasOdds && !evGoals.hasOdds) {
+    blocks.push('Inserisci le quote (1X2 e/o Over/Under 2.5) per calcolare il valore atteso — senza quote e\' solo analisi, nessun pick.');
+  } else {
+    const picks = [ev1x2.pick, evGoals.pick].filter(Boolean);
+    if (picks.length) {
+      blocks.push(picks.map(p =>
+        `<div style="color:var(--green);font-weight:700;margin-top:4px">✅ VALUE PICK: ${escapeHtml(p.label)} @ ${p.odds} (edge ${fmtPct(p.edge)})</div>`
+      ).join(''));
+    } else {
+      blocks.push(`<div style="color:var(--dim);margin-top:4px">⛔ Nessun lato supera il margine minimo (${(MIN_EDGE*100).toFixed(0)}%) — nessun pick di valore su questi mercati.</div>`);
+    }
+  }
+  document.getElementById('evBody').innerHTML = blocks.join('');
 }
 
 function renderResults(xgH, xgA, hd, ad) {
@@ -559,7 +783,10 @@ function renderResults(xgH, xgA, hd, ad) {
   const v  = getVerdetto(xgTot, assenze, hd.avgGF, ad.avgGF, cornTot, motiv, pressione, market);
   const cv = getCornerV(cornTot);
   const scores = topScores(xgH, xgA);
-  const { p1, px, p2 } = probs1x2(xgH, xgA);
+  const { w, d, l } = probs1x2Raw(xgH, xgA);
+  const p1 = Math.round(w*100), px = Math.round(d*100), p2 = Math.round(l*100);
+
+  renderEV(w, d, l, xgH, xgA);
 
   // Verdict
   const verdEl = document.getElementById('verdict');
@@ -572,6 +799,8 @@ function renderResults(xgH, xgA, hd, ad) {
   // xG cards
   document.getElementById('rxgH').textContent = xgH.toFixed(2);
   document.getElementById('rxgA').textContent = xgA.toFixed(2);
+  document.getElementById('rxgHSub').textContent = hd.homeXG != null ? 'proxy tiri in porta (solo casa)' : 'proxy tiri in porta (media generale)';
+  document.getElementById('rxgASub').textContent = ad.awayXG != null ? 'proxy tiri in porta (solo trasferta)' : 'proxy tiri in porta (media generale)';
   const totEl = document.getElementById('rxgTot');
   totEl.textContent = xgTot.toFixed(2);
   totEl.style.color = xgTot >= 2.5 ? '#f0a500' : '#8a9080';
@@ -622,6 +851,38 @@ function renderResults(xgH, xgA, hd, ad) {
   document.getElementById('results').classList.remove('hidden');
 }
 
+// ─── ASSENZE AUTOMATICHE (infortuni/squalifiche da /injuries) ───────────────
+// NB semantica: prima "assenze" era un punteggio di gravita' soggettivo
+// (-10/+10) digitato a mano, pensato per pesare l'importanza dei giocatori
+// assenti, non un conteggio letterale. Qui invece e' un conteggio REALE
+// (assenti squadra casa - assenti squadra ospite): una rosa che porta 6-8
+// assenze tra infortuni/squalifiche in un dato momento della stagione NON e'
+// per forza un caso "grave" come lo intendeva la soglia originale in
+// getVerdetto (assenze > 7 -> NO BET). Il valore resta comunque modificabile
+// a mano dopo il fill automatico, per correggere quando il conteggio grezzo
+// non riflette l'importanza reale dei giocatori assenti.
+async function autoFillAssenze(homeId, awayId) {
+  const hint = document.getElementById('assenzeHint');
+  const today = new Date().toISOString().slice(0,10);
+  try {
+    log('🩹 Controllo assenze (infortuni/squalifiche)…');
+    const [homeInj, awayInj] = await Promise.all([
+      getInjuries(homeId, today),
+      getInjuries(awayId, today),
+    ]);
+    const homeN = homeInj.length;
+    const awayN = awayInj.length;
+    document.getElementById('inAssenze').value = homeN - awayN;
+    hint.textContent = `🩹 auto: casa ${homeN} assenti, ospite ${awayN} assenti — conteggio reale, non gravità soggettiva (modificabile)`;
+    hint.style.color = 'var(--dim)';
+    log(`✅ Assenze: casa ${homeN}, ospite ${awayN}`);
+  } catch (e) {
+    hint.textContent = `⚠️ assenze non rilevate automaticamente (${e.message}) — inserisci a mano`;
+    hint.style.color = 'var(--amber)';
+    log(`⚠️ Assenze auto non disponibili: ${e.message}`);
+  }
+}
+
 // ─── ANALYZE ───────────────────────────────────────────────────────────────
 async function analyze() {
   const home = document.getElementById('homeInput').value.trim();
@@ -636,17 +897,27 @@ async function analyze() {
   document.getElementById('results').classList.add('hidden');
 
   try {
-    const hd = await buildTeamProfile(home);
+    // Se la squadra e' stata selezionata da "Partite di oggi" e il nome in
+    // input non e' stato toccato da allora, riusa l'ID gia' certo invece di
+    // ricercare per nome (evita ambiguita' gia' risolta e una chiamata API).
+    const homeId = resolvedTeam.home && resolvedTeam.home.name === home ? resolvedTeam.home.id : null;
+    const awayId = resolvedTeam.away && resolvedTeam.away.name === away ? resolvedTeam.away.id : null;
+
+    const hd = await buildTeamProfile(home, homeId);
     renderTeamCard(document.getElementById('cardHome'), hd);
 
-    const ad = await buildTeamProfile(away);
+    const ad = await buildTeamProfile(away, awayId);
     renderTeamCard(document.getElementById('cardAway'), ad);
 
     document.getElementById('teamCards').classList.remove('hidden');
 
+    await autoFillAssenze(hd.teamId, ad.teamId);
+
     log('🔮 Calcolo previsione…');
-    const xgH = Math.max(0.05, hd.avgXG);
-    const xgA = Math.max(0.05, ad.avgXG);
+    // xG specifico casa/trasferta quando il campione lo permette (vedi
+    // MIN_SPLIT in buildTeamProfile), altrimenti media generale come prima.
+    const xgH = Math.max(0.05, hd.homeXG ?? hd.avgXG);
+    const xgA = Math.max(0.05, ad.awayXG ?? ad.avgXG);
     renderResults(xgH, xgA, hd, ad);
     log('✅ Analisi completata.');
 
@@ -676,34 +947,68 @@ async function loadToday() {
       byLeague[k].push(f);
     });
 
-    let html = '';
+    // Costruito via DOM API (non innerHTML con stringhe interpolate): i nomi
+    // squadra vengono da api-football, non da input utente, ma cosi' non
+    // serve nessun escaping manuale ne' rischio di rompere l'attributo
+    // onclick se un nome contenesse virgolette o altri caratteri speciali.
+    panel.innerHTML = '';
     Object.entries(byLeague).forEach(([league, matches]) => {
-      html += `<div class="league-header">${league}</div>`;
+      const header = document.createElement('div');
+      header.className = 'league-header';
+      header.textContent = league;
+      panel.appendChild(header);
+
       matches.forEach(f => {
         const time = f.fixture.date
           ? new Date(f.fixture.date).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'})
           : '--:--';
         const status = f.fixture.status?.short;
         const isLive = ['1H','HT','2H','ET','P'].includes(status);
-        const score = (f.goals.home !== null && f.goals.away !== null)
-          ? `<span style="color:var(--amber);font-weight:700;font-family:'JetBrains Mono',monospace">${f.goals.home}–${f.goals.away}</span>`
-          : `<span class="fixture-time">${time}</span>`;
-        html += `
-          <button class="fixture-item" onclick="selectFixture('${f.teams.home.name.replace(/'/g,"\\'")}','${f.teams.away.name.replace(/'/g,"\\'")}')">
-            <span style="font-weight:600">${f.teams.home.name}</span>
-            ${isLive ? `<span style="color:var(--red);font-size:10px;margin:0 6px">🔴 LIVE</span>` : score}
-            <span style="font-weight:600">${f.teams.away.name}</span>
-          </button>`;
+        const hasScore = f.goals.home !== null && f.goals.away !== null;
+
+        const btn = document.createElement('button');
+        btn.className = 'fixture-item';
+        btn.addEventListener('click', () => selectFixture(f.teams.home.name, f.teams.away.name, f.teams.home.id, f.teams.away.id));
+
+        const homeSpan = document.createElement('span');
+        homeSpan.style.fontWeight = '600';
+        homeSpan.textContent = f.teams.home.name;
+
+        const midSpan = document.createElement('span');
+        if (isLive) {
+          midSpan.style.cssText = 'color:var(--red);font-size:10px;margin:0 6px';
+          midSpan.textContent = '🔴 LIVE';
+        } else if (hasScore) {
+          midSpan.style.cssText = "color:var(--amber);font-weight:700;font-family:'JetBrains Mono',monospace";
+          midSpan.textContent = `${f.goals.home}–${f.goals.away}`;
+        } else {
+          midSpan.className = 'fixture-time';
+          midSpan.textContent = time;
+        }
+
+        const awaySpan = document.createElement('span');
+        awaySpan.style.fontWeight = '600';
+        awaySpan.textContent = f.teams.away.name;
+
+        btn.append(homeSpan, midSpan, awaySpan);
+        panel.appendChild(btn);
       });
     });
-    panel.innerHTML = html;
     todayLoaded = true;
   } catch(err) {
-    panel.innerHTML = `<div style="font-size:12px;color:var(--red)">💥 ${err.message}</div>`;
+    panel.innerHTML = '';
+    const errDiv = document.createElement('div');
+    errDiv.style.cssText = 'font-size:12px;color:var(--red)';
+    errDiv.textContent = `💥 ${err.message}`;
+    panel.appendChild(errDiv);
   }
 }
 
-function selectFixture(home, away) {
+function selectFixture(home, away, homeId, awayId) {
+  // ID gia' certo dal fixture selezionato: analyze() lo riusera' invece di
+  // ricercare per nome (vedi resolvedTeam).
+  resolvedTeam.home = { id: homeId, name: home };
+  resolvedTeam.away = { id: awayId, name: away };
   document.getElementById('homeInput').value = home;
   document.getElementById('awayInput').value = away;
   switchTab('search');
@@ -758,6 +1063,7 @@ function resetKey() {
 
 // Auto-load key from localStorage on page open
 window.addEventListener('DOMContentLoaded', () => {
+  updateCallCounterUI(getCallCount());
   const saved = localStorage.getItem('af_api_key');
   if (saved) activateKey(saved);
 });
@@ -769,6 +1075,12 @@ document.addEventListener('keydown', e => {
     if (['homeInput','awayInput'].includes(document.activeElement.id)) analyze();
   }
 });
+
+// Modificare a mano il nome invalida la squadra risolta da "Partite di
+// oggi": altrimenti analyze() riuserebbe un ID che non corrisponde piu' al
+// testo digitato.
+document.getElementById('homeInput').addEventListener('input', () => { resolvedTeam.home = null; });
+document.getElementById('awayInput').addEventListener('input', () => { resolvedTeam.away = null; });
 </script>
 </body>
 </html>
